@@ -1,9 +1,8 @@
-cat > /usr/local/bin/backendmgr <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
 APP_NAME="Backend Manager Nenenet 3.0"
-APP_VER="3.0.1-fix"
+APP_VER="3.0.2"
 
 CFG_FILE="/etc/backendmgr/config.json"
 BACKUP_DIR="/root/backendmgr-backups"
@@ -18,12 +17,10 @@ NGX_APPLY_SNIP="${NGX_DIR}/apply.conf"
 
 NGX_BALANCER_CONF="${NGX_DIR}/balancer.conf"
 NGX_BALANCED_MAP="${NGX_DIR}/balanced.map"
-
 NGX_LIMITS_IP="${NGX_DIR}/limits_ip.map"
 NGX_LIMITS_BACKEND="${NGX_DIR}/limits_backend.map"
 NGX_LIMITS_URL="${NGX_DIR}/limits_url.map"
 
-# ---- Colores
 NC='\033[0m'
 RED='\033[0;31m'
 GRN='\033[0;32m'
@@ -40,27 +37,24 @@ nginx_test_reload() { nginx -t && systemctl reload nginx; }
 nginx_active() { systemctl is-active --quiet nginx && echo "ACTIVO" || echo "INACTIVO"; }
 
 read_cfg() {
-  [[ -f "$CFG_FILE" ]] || die "Falta $CFG_FILE. Reinstalá con install.sh"
-  NGINX_CONF="$(jq -r '.nginx_conf' "$CFG_FILE")"
+  [[ -f "$CFG_FILE" ]] || die "Falta $CFG_FILE. Instalá con install.sh"
   HEADER_NAME="$(jq -r '.header_name' "$CFG_FILE")"
-
   RL_ENABLED="$(jq -r '.rate_limit_enabled' "$CFG_FILE")"
   RL_RATE="$(jq -r '.rate_limit_rate' "$CFG_FILE")"
   RL_BURST="$(jq -r '.rate_limit_burst' "$CFG_FILE")"
   CONN_LIMIT="$(jq -r '.conn_limit' "$CFG_FILE")"
-
   CURL_TMO="$(jq -r '.curl_timeout_seconds' "$CFG_FILE")"
   WINDOW_SEC="$(jq -r '.traffic_window_seconds' "$CFG_FILE")"
   STATS_LOG="$(jq -r '.stats_log_path' "$CFG_FILE")"
-
   BAL_MODE="$(jq -r '.balance_mode' "$CFG_FILE")"
   BAL_CAP="$(jq -r '.balance_max_slots_cap' "$CFG_FILE")"
 }
 
 ensure_files() {
-  mkdir -p "$NGX_DIR" /var/lib/backendmgr "$BACKUP_DIR"
-  [[ -f "$NGX_MAIN_INCLUDE" ]] || die "Falta $NGX_MAIN_INCLUDE (reinstalá install.sh)."
-  for f in "$NGX_BACKENDS_MAP" "$NGX_DOMAINS_MAP" "$NGX_DEFAULTS_MAP" "$NGX_LOGGING_SNIP" \
+  mkdir -p "$NGX_DIR" "/var/lib/backendmgr" "$BACKUP_DIR"
+  chmod 700 "$BACKUP_DIR" || true
+
+  for f in "$NGX_MAIN_INCLUDE" "$NGX_BACKENDS_MAP" "$NGX_DOMAINS_MAP" "$NGX_DEFAULTS_MAP" "$NGX_LOGGING_SNIP" \
            "$NGX_APPLY_SNIP" "$NGX_BALANCER_CONF" "$NGX_BALANCED_MAP" \
            "$NGX_LIMITS_IP" "$NGX_LIMITS_BACKEND" "$NGX_LIMITS_URL"
   do
@@ -72,22 +66,63 @@ banner() {
   clear
   echo -e "${CYA}╔══════════════════════════════════════════════════════════════╗${NC}"
   echo -e "${CYA}║${NC}  🚀 ${APP_NAME}  v${APP_VER}                                   ${CYA}║${NC}"
-  echo -e "${CYA}║${NC}  Header: ${WHT}${HEADER_NAME}${NC} | Balance: ${WHT}${BAL_MODE}${NC} | SpeedLimits: IP/Backend/URL  ${CYA}║${NC}"
+  echo -e "${CYA}║${NC}  Header: ${WHT}${HEADER_NAME}${NC} | Balance: ${WHT}${BAL_MODE}${NC} | Limits: IP/Backend/URL      ${CYA}║${NC}"
   echo -e "${CYA}╚══════════════════════════════════════════════════════════════╝${NC}"
   echo
 }
 
 quick_status() {
-  echo -e "${WHT}📊 ESTADO RÁPIDO${NC}"
+  echo -e "${WHT}📊 ESTADO${NC}"
   echo -e "   🧩 Nginx: ${GRN}$(nginx_active)${NC}"
   echo -e "   ⚖️ Balance: ${GRN}${BAL_MODE}${NC}"
-  echo -e "   🛡️ RateLimit(req/conn): ${GRN}${RL_ENABLED}${NC}  (${RL_RATE} burst ${RL_BURST} conn ${CONN_LIMIT})"
+  echo -e "   🛡️ RateLimit: ${GRN}${RL_ENABLED}${NC} (${RL_RATE}, burst ${RL_BURST}, conn ${CONN_LIMIT})"
   echo -e "   📈 Stats log: ${DIM}${STATS_LOG}${NC}"
   echo
 }
 
-# ---------------- Backup/Restore ----------------
+# ---------------- FIX: maps multilínea (para que opciones 1/2/3 funcionen) ----------------
+normalize_domains_map() {
+  if grep -qE 'map\s+\$host\s+\$backend_domain\s*\{[^}]*\}' "$NGX_DOMAINS_MAP"; then
+    cat > "$NGX_DOMAINS_MAP" <<'EOF'
+map $host $backend_domain {
+    default "_default";
+}
+EOF
+  fi
+}
 
+normalize_defaults_map() {
+  if grep -qE 'map\s+\$backend_domain\s+\$default_backend_url\s*\{[^}]*\}' "$NGX_DEFAULTS_MAP"; then
+    cat > "$NGX_DEFAULTS_MAP" <<'EOF'
+map $backend_domain $default_backend_url {
+    default "http://127.0.0.1:8880";
+}
+EOF
+  fi
+}
+
+normalize_balancer_default() {
+  # FIX: evita "set" en http{}
+  if grep -qE '^\s*set\s+\$backendmgr_slot' "$NGX_BALANCER_CONF"; then
+    cat > "$NGX_BALANCER_CONF" <<'EOF'
+# backendmgr balancer.conf (balance OFF)
+map $host $backendmgr_balance { default 0; }
+map $host $backendmgr_slot { default "0"; }
+
+map "$backend_domain:$backendmgr_slot" $balanced_backend_url {
+    default $default_backend_url;
+}
+EOF
+  fi
+}
+
+normalize_all_maps() {
+  normalize_domains_map
+  normalize_defaults_map
+  normalize_balancer_default
+}
+
+# ---------------- Backup/Restore ----------------
 backup_bundle() {
   mkdir -p "$BACKUP_DIR"
   local out="${BACKUP_DIR}/bundle-$(date +%Y%m%d-%H%M%S).tar.gz"
@@ -104,7 +139,7 @@ restore_bundle() {
   file="$(ls -1t "${BACKUP_DIR}"/bundle-*.tar.gz 2>/dev/null | sed -n "${n}p")"
   [[ -n "${file:-}" ]] || { echo -e "${YLW}Selección inválida.${NC}"; return; }
 
-  echo -e "${YLW}⚠️ Hago backup de seguridad antes de restaurar.${NC}"
+  echo -e "${YLW}⚠️ Backup de seguridad antes de restaurar.${NC}"
   backup_bundle
   tar -xzf "$file" -C / 2>/dev/null || true
   nginx_test_reload
@@ -112,7 +147,6 @@ restore_bundle() {
 }
 
 # ---------------- Validaciones ----------------
-
 validate_domain() { [[ "$1" =~ ^[A-Za-z0-9.-]{3,253}$ ]]; }
 validate_key() { [[ "$1" =~ ^[A-Za-z0-9_.:-]{2,64}$ ]]; }
 validate_url() { [[ "$1" =~ ^http://[A-Za-z0-9._-]+:[0-9]{2,5}$ ]]; }
@@ -120,9 +154,8 @@ validate_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 validate_rate() { [[ "$1" == "0" || "$1" =~ ^[0-9]+[kKmM]$ ]]; }
 
 # ---------------- Dominios ----------------
-
 list_domains() {
-  echo -e "${WHT}Dominios:${NC}"
+  echo -e "${WHT}Dominios registrados:${NC}"
   grep -E '^\s*"[A-Za-z0-9.-]+"\s+"' "$NGX_DOMAINS_MAP" 2>/dev/null \
     | sed -E 's/^\s*"([^"]+)".*$/\1/' | sort -u || true
 }
@@ -133,13 +166,19 @@ add_domain() {
   validate_domain "$dom" || { echo -e "${RED}Dominio inválido.${NC}"; return; }
 
   if ! grep -qE "^\s*\"${dom//\./\\.}\"" "$NGX_DOMAINS_MAP"; then
-    awk -v dom="$dom" 'BEGIN{done=0} /^\}\s*$/ && !done{printf "    \"%s\" \"%s\";\n",dom,dom; done=1} {print}' \
-      "$NGX_DOMAINS_MAP" > "${NGX_DOMAINS_MAP}.tmp" && mv "${NGX_DOMAINS_MAP}.tmp" "$NGX_DOMAINS_MAP"
+    awk -v dom="$dom" '
+      BEGIN{done=0}
+      /^\}\s*$/ && !done { printf "    \"%s\" \"%s\";\n", dom, dom; done=1 }
+      {print}
+    ' "$NGX_DOMAINS_MAP" > "${NGX_DOMAINS_MAP}.tmp" && mv "${NGX_DOMAINS_MAP}.tmp" "$NGX_DOMAINS_MAP"
   fi
 
   if ! grep -qE "^\s*\"${dom//\./\\.}\"" "$NGX_DEFAULTS_MAP"; then
-    awk -v dom="$dom" 'BEGIN{done=0} /^\}\s*$/ && !done{printf "    \"%s\" \"http://127.0.0.1:8880\";\n",dom; done=1} {print}' \
-      "$NGX_DEFAULTS_MAP" > "${NGX_DEFAULTS_MAP}.tmp" && mv "${NGX_DEFAULTS_MAP}.tmp" "$NGX_DEFAULTS_MAP"
+    awk -v dom="$dom" '
+      BEGIN{done=0}
+      /^\}\s*$/ && !done { printf "    \"%s\" \"http://127.0.0.1:8880\";\n", dom; done=1 }
+      {print}
+    ' "$NGX_DEFAULTS_MAP" > "${NGX_DEFAULTS_MAP}.tmp" && mv "${NGX_DEFAULTS_MAP}.tmp" "$NGX_DEFAULTS_MAP"
   fi
 
   rebuild_balancer_files >/dev/null 2>&1 || true
@@ -149,7 +188,6 @@ add_domain() {
 }
 
 # ---------------- Backends ----------------
-
 list_backends_for_domain() {
   read -r -p "Dominio: " dom
   validate_domain "$dom" || { echo -e "${RED}Dominio inválido.${NC}"; return; }
@@ -165,14 +203,18 @@ list_backends_for_domain() {
 add_or_update_backend() {
   echo -e "${CYA}Agregar / Actualizar backend${NC}"
   read -r -p "Dominio: " dom
-  read -r -p "Key: " key
-  read -r -p "URL (http://IP:PUERTO): " url
+  read -r -p "Backend key (ej: svpnene38): " key
+  read -r -p "IP (ej: 179.43.112.38): " ip
+  read -r -p "Puerto (ej: 80): " port
 
   validate_domain "$dom" || { echo -e "${RED}Dominio inválido.${NC}"; return; }
   validate_key "$key" || { echo -e "${RED}Key inválida.${NC}"; return; }
-  validate_url "$url" || { echo -e "${RED}URL inválida.${NC}"; return; }
+  validate_ip "$ip" || { echo -e "${RED}IP inválida.${NC}"; return; }
+  [[ "$port" =~ ^[0-9]{2,5}$ ]] || { echo -e "${RED}Puerto inválido.${NC}"; return; }
 
+  local url="http://${ip}:${port}"
   local dk="${dom}:${key}"
+
   if grep -qE "^\s*\"${dk//\./\\.}\"" "$NGX_BACKENDS_MAP"; then
     awk -v dk="$dk" -v url="$url" '{ re="^[ \t]*\""dk"\""; if($0 ~ re){ sub(/"http:\/\/[^"]+"/, "\""url"\"") } print }' \
       "$NGX_BACKENDS_MAP" > "${NGX_BACKENDS_MAP}.tmp" && mv "${NGX_BACKENDS_MAP}.tmp" "$NGX_BACKENDS_MAP"
@@ -202,8 +244,53 @@ delete_backend() {
   echo -e "${GRN}✅ Eliminado.${NC}"
 }
 
-# ---------------- Healthcheck ----------------
+# ---------------- Wizard inicial ----------------
+wizard_setup() {
+  echo -e "${CYA}Asistente Inicial (1 dominio + 1 backend)${NC}"
+  echo
 
+  read -r -p "Dominio (ej: cpu2.elnene.site): " dom
+  validate_domain "$dom" || { echo -e "${RED}Dominio inválido.${NC}"; return; }
+
+  read -r -p "Backend key (ej: svpnene38): " key
+  validate_key "$key" || { echo -e "${RED}Key inválida.${NC}"; return; }
+
+  read -r -p "IP (ej: 179.43.112.38): " ip
+  validate_ip "$ip" || { echo -e "${RED}IP inválida.${NC}"; return; }
+
+  read -r -p "Puerto (ej: 80): " port
+  [[ "$port" =~ ^[0-9]{2,5}$ ]] || { echo -e "${RED}Puerto inválido.${NC}"; return; }
+
+  # crea dominio si falta
+  if ! grep -qE "^\s*\"${dom//\./\\.}\"" "$NGX_DOMAINS_MAP"; then
+    awk -v dom="$dom" '
+      BEGIN{done=0}
+      /^\}\s*$/ && !done { printf "    \"%s\" \"%s\";\n", dom, dom; done=1 }
+      {print}
+    ' "$NGX_DOMAINS_MAP" > "${NGX_DOMAINS_MAP}.tmp" && mv "${NGX_DOMAINS_MAP}.tmp" "$NGX_DOMAINS_MAP"
+  fi
+
+  if ! grep -qE "^\s*\"${dom//\./\\.}\"" "$NGX_DEFAULTS_MAP"; then
+    awk -v dom="$dom" '
+      BEGIN{done=0}
+      /^\}\s*$/ && !done { printf "    \"%s\" \"http://127.0.0.1:8880\";\n", dom; done=1 }
+      {print}
+    ' "$NGX_DEFAULTS_MAP" > "${NGX_DEFAULTS_MAP}.tmp" && mv "${NGX_DEFAULTS_MAP}.tmp" "$NGX_DEFAULTS_MAP"
+  fi
+
+  # agrega backend
+  local url="http://${ip}:${port}"
+  local dk="${dom}:${key}"
+  printf "    \"%s\" \"%s\";\n" "$dk" "$url" >> "$NGX_BACKENDS_MAP"
+
+  rebuild_balancer_files >/dev/null 2>&1 || true
+  write_apply_conf >/dev/null 2>&1 || true
+  nginx_test_reload
+
+  echo -e "${GRN}✅ Asistente completado.${NC}"
+}
+
+# ---------------- Healthcheck ----------------
 healthcheck_all() {
   echo -e "${CYA}Healthcheck (todos)${NC}"
   echo -e "${DIM}curl timeout: ${CURL_TMO}s${NC}"
@@ -216,16 +303,71 @@ healthcheck_all() {
     url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
     dom="${domkey%%:*}"
     key="${domkey#*:}"
+
     out="$(curl -m "$CURL_TMO" -s -o /dev/null -w "%{http_code} %{time_total}" "${url}/" || echo "000 9.999")"
     code="$(echo "$out" | awk '{print $1}')"
     t="$(echo "$out" | awk '{print $2}')"
     ms="$(awk -v x="$t" 'BEGIN{printf "%.0f", x*1000}')"
+
     printf "%-22s %-18s %-26s %-8s %-10s\n" "$dom" "$key" "$url" "$code" "$ms"
   done
 }
 
-# ---------------- Balanceador (FIX: sin "set" en http) ----------------
+# ---------------- Rate-limit req/conn ----------------
+rewrite_rate_zone() {
+  if grep -qE '^\s*limit_req_zone\s+\$binary_remote_addr\s+zone=backendmgr_req:10m\s+rate=' "$NGX_MAIN_INCLUDE"; then
+    awk -v rate="$RL_RATE" '
+      { if($0 ~ /^\s*limit_req_zone\s+\$binary_remote_addr\s+zone=backendmgr_req:10m\s+rate=/){ sub(/rate=[^;]+;/, "rate="rate";") } print }
+    ' "$NGX_MAIN_INCLUDE" > "${NGX_MAIN_INCLUDE}.tmp" && mv "${NGX_MAIN_INCLUDE}.tmp" "$NGX_MAIN_INCLUDE"
+  fi
+}
 
+rate_limit_menu() {
+  echo -e "${CYA}Rate Limit (requests/connections)${NC}"
+  echo "Estado:     $RL_ENABLED"
+  echo "Rate:       $RL_RATE"
+  echo "Burst:      $RL_BURST"
+  echo "Conn limit: $CONN_LIMIT"
+  echo
+  echo "1) Activar / Desactivar"
+  echo "2) Cambiar rate (ej: 10r/s)"
+  echo "3) Cambiar burst"
+  echo "4) Cambiar conn limit"
+  echo "5) Aplicar"
+  read -r -p "Opción: " op
+
+  case "$op" in
+    1)
+      if [[ "$RL_ENABLED" == "true" ]]; then RL_ENABLED="false"; else RL_ENABLED="true"; fi
+      jq ".rate_limit_enabled = ${RL_ENABLED}" "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
+      ;;
+    2)
+      read -r -p "Nuevo rate: " v
+      [[ "$v" =~ ^[0-9]+r/s$ ]] || { echo -e "${RED}Formato inválido (ej: 10r/s).${NC}"; return; }
+      jq --arg v "$v" '.rate_limit_rate = $v' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
+      ;;
+    3)
+      read -r -p "Nuevo burst: " v
+      [[ "$v" =~ ^[0-9]+$ ]] || { echo -e "${RED}Inválido.${NC}"; return; }
+      jq --argjson v "$v" '.rate_limit_burst = $v' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
+      ;;
+    4)
+      read -r -p "Nuevo conn limit: " v
+      [[ "$v" =~ ^[0-9]+$ ]] || { echo -e "${RED}Inválido.${NC}"; return; }
+      jq --argjson v "$v" '.conn_limit = $v' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
+      ;;
+    5)
+      read_cfg
+      rewrite_rate_zone
+      write_apply_conf
+      nginx_test_reload
+      echo -e "${GRN}✅ Aplicado.${NC}"
+      ;;
+    *) echo "Opción inválida" ;;
+  esac
+}
+
+# ---------------- Balanceador ----------------
 get_domains_list() {
   grep -E '^\s*"[A-Za-z0-9.-]+"\s+"' "$NGX_DOMAINS_MAP" 2>/dev/null | sed -E 's/^\s*"([^"]+)".*$/\1/' | sort -u
 }
@@ -250,7 +392,6 @@ rebuild_balancer_files() {
   (( max < 2 )) && max=2
   (( max > cap )) && max="$cap"
 
-  # balanced.map: "dom:i" "url";
   : > "$NGX_BALANCED_MAP"
   while read -r d; do
     [[ -z "$d" ]] && continue
@@ -264,14 +405,15 @@ rebuild_balancer_files() {
   done < <(get_domains_list)
 
   if [[ "$BAL_MODE" == "off" ]]; then
-    cat > "$NGX_BALANCER_CONF" <<'EOC'
+    cat > "$NGX_BALANCER_CONF" <<'EOF'
 # backendmgr balancer.conf (balance OFF)
 map $host $backendmgr_balance { default 0; }
 map $host $backendmgr_slot { default "0"; }
+
 map "$backend_domain:$backendmgr_slot" $balanced_backend_url {
     default $default_backend_url;
 }
-EOC
+EOF
     return 0
   fi
 
@@ -282,7 +424,6 @@ EOC
     *) split_key='$remote_addr' ;;
   esac
 
-  # porcentajes sumando 100
   local base=$((100 / max))
   local rem=$((100 - base * max))
 
@@ -291,7 +432,7 @@ EOC
     echo "map \$host \$backendmgr_balance { default 1; }"
     echo "split_clients \"${split_key}\" \$backendmgr_slot {"
     for ((i=0;i<max;i++)); do
-      local pct="$base"
+      pct="$base"
       if (( rem > 0 )); then pct=$((pct+1)); rem=$((rem-1)); fi
       echo "    ${pct}% \"${i}\";"
     done
@@ -304,9 +445,9 @@ EOC
 }
 
 set_balance_mode() {
-  echo -e "${CYA}Balanceador${NC}"
+  echo -e "${CYA}Balanceador (equilibrar tráfico)${NC}"
   echo "1) OFF (por header Backend)"
-  echo "2) RANDOM (reparte)"
+  echo "2) RANDOM (reparte por request)"
   echo "3) STICKY-IP (iphash)"
   read -r -p "Opción: " op
   case "$op" in
@@ -322,17 +463,7 @@ set_balance_mode() {
   echo -e "${GRN}✅ Balance: ${BAL_MODE}${NC}"
 }
 
-# ---------------- Apply.conf (balance + limits + stats) ----------------
-
-rewrite_rate_zone() {
-  # Ajusta rate del limit_req_zone en backendmgr.conf
-  if grep -qE '^\s*limit_req_zone\s+\$binary_remote_addr\s+zone=backendmgr_req:10m\s+rate=' "$NGX_MAIN_INCLUDE"; then
-    awk -v rate="$RL_RATE" '
-      { if($0 ~ /^\s*limit_req_zone\s+\$binary_remote_addr\s+zone=backendmgr_req:10m\s+rate=/){ sub(/rate=[^;]+;/, "rate="rate";") } print }
-    ' "$NGX_MAIN_INCLUDE" > "${NGX_MAIN_INCLUDE}.tmp" && mv "${NGX_MAIN_INCLUDE}.tmp" "$NGX_MAIN_INCLUDE"
-  fi
-}
-
+# ---------------- Limits (speed) ----------------
 write_apply_conf() {
   read_cfg
   rewrite_rate_zone >/dev/null 2>&1 || true
@@ -354,19 +485,17 @@ EOF_APPLY
 
   if [[ "$RL_ENABLED" == "true" ]]; then
     cat >> "$NGX_APPLY_SNIP" <<EOF_RL
-# Rate limit (requests/connections)
 limit_req zone=backendmgr_req burst=${RL_BURST} nodelay;
 limit_conn backendmgr_conn ${CONN_LIMIT};
 
 EOF_RL
   else
-    cat >> "$NGX_APPLY_SNIP" <<'EOF_NO'
-# Rate limit desactivado
-EOF_NO
+    cat >> "$NGX_APPLY_SNIP" <<'EOF_OFF'
+# rate-limit desactivado
+EOF_OFF
   fi
 
   cat >> "$NGX_APPLY_SNIP" <<'EOF_LIMITS'
-
 # Speed limits (0 = unlimited)
 # prioridad: Backend(dom:key) > URL(actual) > IP
 set $nenenet_rate 0;
@@ -378,8 +507,6 @@ if ($nenenet_rate = 0) { if ($ip_limit_rate != 0) { set $nenenet_rate $ip_limit_
 limit_rate $nenenet_rate;
 EOF_LIMITS
 }
-
-# ---------------- Limits (speed) ----------------
 
 limits_list() {
   echo -e "${WHT}Límites por IP:${NC} ${DIM}${NGX_LIMITS_IP}${NC}"
@@ -415,17 +542,14 @@ limit_backend_set() {
   read -r -p "Dominio: " dom
   read -r -p "Key: " key
   read -r -p "Rate (0=unlimited, 500k, 1m, 5m): " rate
-
   validate_domain "$dom" || { echo -e "${RED}Dominio inválido.${NC}"; return; }
   validate_key "$key" || { echo -e "${RED}Key inválida.${NC}"; return; }
   validate_rate "$rate" || { echo -e "${RED}Rate inválido.${NC}"; return; }
 
   local dk="${dom}:${key}"
-
   if grep -qE "^\s*\"${dk//\./\\.}\"" "$NGX_LIMITS_BACKEND"; then
-    awk -v dk="$dk" -v r="$rate" '
-      { re="^[ \t]*\""dk"\""; if($0 ~ re){ print "    \""dk"\" "r";" } else print }
-    ' "$NGX_LIMITS_BACKEND" > "${NGX_LIMITS_BACKEND}.tmp" && mv "${NGX_LIMITS_BACKEND}.tmp" "$NGX_LIMITS_BACKEND"
+    awk -v dk="$dk" -v r="$rate" '{ re="^[ \t]*\""dk"\""; if($0 ~ re){ print "    \""dk"\" "r";" } else print }' \
+      "$NGX_LIMITS_BACKEND" > "${NGX_LIMITS_BACKEND}.tmp" && mv "${NGX_LIMITS_BACKEND}.tmp" "$NGX_LIMITS_BACKEND"
   else
     echo "    \"${dk}\" ${rate};" >> "$NGX_LIMITS_BACKEND"
   fi
@@ -439,14 +563,12 @@ limit_url_set() {
   echo -e "${CYA}Set límite por URL (http://ip:port)${NC}"
   read -r -p "URL: " url
   read -r -p "Rate (0=unlimited, 500k, 1m, 5m): " rate
-
   validate_url "$url" || { echo -e "${RED}URL inválida.${NC}"; return; }
   validate_rate "$rate" || { echo -e "${RED}Rate inválido.${NC}"; return; }
 
   if grep -qE "^\s*\"${url//\//\\/}\"" "$NGX_LIMITS_URL"; then
-    awk -v u="$url" -v r="$rate" '
-      { re="^[ \t]*\""u"\""; if($0 ~ re){ print "    \""u"\" "r";" } else print }
-    ' "$NGX_LIMITS_URL" > "${NGX_LIMITS_URL}.tmp" && mv "${NGX_LIMITS_URL}.tmp" "$NGX_LIMITS_URL"
+    awk -v u="$url" -v r="$rate" '{ re="^[ \t]*\""u"\""; if($0 ~ re){ print "    \""u"\" "r";" } else print }' \
+      "$NGX_LIMITS_URL" > "${NGX_LIMITS_URL}.tmp" && mv "${NGX_LIMITS_URL}.tmp" "$NGX_LIMITS_URL"
   else
     echo "    \"${url}\" ${rate};" >> "$NGX_LIMITS_URL"
   fi
@@ -472,17 +594,14 @@ limits_menu() {
   esac
 }
 
-# ---------------- Tráfico por IP/Backend (requiere stats log) ----------------
-
+# ---------------- Tráfico (simple) ----------------
 traffic_by_ip() {
   echo -e "${CYA}Tráfico por IP (últimos ${WINDOW_SEC}s)${NC}"
-  [[ -f "$STATS_LOG" ]] || { echo -e "${YLW}No existe stats log:${NC} $STATS_LOG"; echo "Poné include apply.conf en tu location / y recargá."; return; }
+  [[ -f "$STATS_LOG" ]] || { echo -e "${YLW}No existe stats log:${NC} $STATS_LOG"; echo "Incluí apply.conf en location / y recargá nginx."; return; }
 
   local now cut
   now="$(date +%s)"; cut=$((now - WINDOW_SEC))
 
-  printf "%-18s %-12s\n" "IP" "BYTES"
-  echo "-------------------------------"
   tail -n 20000 "$STATS_LOG" | gawk -F'\\|' -v cut="$cut" '
     function mon(m){ return index("JanFebMarAprMayJunJulAugSepOctNovDec", m)/3 }
     function toEpoch(t,   d,mo,y,h,mi,s){
@@ -491,18 +610,16 @@ traffic_by_ip() {
     }
     { e=toEpoch($1); ip=$2; bytes=$8+0; if(e>=cut){ sum[ip]+=bytes } }
     END{ for(ip in sum) printf "%s\t%.0f\n", ip, sum[ip] }
-  ' | sort -k2 -nr | head -n 25 | awk '{ printf "%-18s %-12s\n", $1, $2 }'
+  ' | sort -k2 -nr | head -n 25
 }
 
 traffic_by_backend() {
   echo -e "${CYA}Tráfico por Backend (últimos ${WINDOW_SEC}s)${NC}"
-  [[ -f "$STATS_LOG" ]] || { echo -e "${YLW}No existe stats log:${NC} $STATS_LOG"; echo "Poné include apply.conf en tu location / y recargá."; return; }
+  [[ -f "$STATS_LOG" ]] || { echo -e "${YLW}No existe stats log:${NC} $STATS_LOG"; echo "Incluí apply.conf en location / y recargá nginx."; return; }
 
   local now cut
   now="$(date +%s)"; cut=$((now - WINDOW_SEC))
 
-  printf "%-32s %-12s\n" "DOMINIO:KEY" "BYTES"
-  echo "------------------------------------------------"
   tail -n 20000 "$STATS_LOG" | gawk -F'\\|' -v cut="$cut" '
     function mon(m){ return index("JanFebMarAprMayJunJulAugSepOctNovDec", m)/3 }
     function toEpoch(t,   d,mo,y,h,mi,s){
@@ -511,7 +628,7 @@ traffic_by_backend() {
     }
     { e=toEpoch($1); dom=$4; key=$5; bytes=$8+0; if(e>=cut){ sum[dom":"key]+=bytes } }
     END{ for(k in sum) printf "%s\t%.0f\n", k, sum[k] }
-  ' | sort -k2 -nr | head -n 25 | awk '{ printf "%-32s %-12s\n", $1, $2 }'
+  ' | sort -k2 -nr | head -n 25
 }
 
 traffic_menu() {
@@ -526,21 +643,23 @@ traffic_menu() {
   esac
 }
 
-menu() {
+main_menu() {
   echo -e "${WHT}📌 MENÚ PRINCIPAL${NC}"
-  echo "  1) 🌐 Dominios: listar"
-  echo "  2) 🌐 Dominios: agregar"
-  echo "  3) 📄 Backends: listar por dominio"
-  echo "  4) ➕ Backends: agregar/actualizar"
-  echo "  5) 🗑️  Backends: eliminar"
-  echo "  6) ✅ Healthcheck: todos"
-  echo "  7) ⚖️ Balanceador: OFF/RANDOM/STICKY-IP"
-  echo "  8) 🚦 Limitar velocidad: IP/Backend/URL"
-  echo "  9) 📊 Tráfico: por IP o Backend"
-  echo " 10) 💾 Backup completo"
-  echo " 11) ♻️  Restaurar backup"
-  echo " 12) 🔄 Reload Nginx"
-  echo " 13) ♻️  Restart Nginx"
+  echo "  1) 🧙 Asistente inicial (dominio + backend)"
+  echo "  2) 🌐 Dominios: listar"
+  echo "  3) 🌐 Dominios: agregar"
+  echo "  4) 📄 Backends: listar por dominio"
+  echo "  5) ➕ Backends: agregar/actualizar"
+  echo "  6) 🗑️  Backends: eliminar"
+  echo "  7) ✅ Healthcheck: todos"
+  echo "  8) 🛡️ Rate limit (req/conn)"
+  echo "  9) ⚖️ Balanceador (OFF/RANDOM/STICKY-IP)"
+  echo " 10) 🚦 Limitar velocidad (IP/Backend/URL)"
+  echo " 11) 📊 Tráfico (IP o Backend)"
+  echo " 12) 💾 Backup completo"
+  echo " 13) ♻️  Restaurar backup"
+  echo " 14) 🔄 Reload Nginx"
+  echo " 15) ♻️  Restart Nginx"
   echo "  0) 🚪 Salir"
   echo
 }
@@ -549,29 +668,32 @@ main() {
   need_root
   read_cfg
   ensure_files
+  normalize_all_maps
   rebuild_balancer_files >/dev/null 2>&1 || true
   write_apply_conf >/dev/null 2>&1 || true
 
   while true; do
     banner
     quick_status
-    menu
+    main_menu
     read -r -p "Opción: " opt
     echo
     case "$opt" in
-      1) list_domains; pause ;;
-      2) add_domain; pause ;;
-      3) list_backends_for_domain; pause ;;
-      4) add_or_update_backend; pause ;;
-      5) delete_backend; pause ;;
-      6) healthcheck_all; pause ;;
-      7) set_balance_mode; pause ;;
-      8) limits_menu; pause ;;
-      9) traffic_menu; pause ;;
-      10) backup_bundle; pause ;;
-      11) restore_bundle; pause ;;
-      12) nginx_test_reload; echo -e "${GRN}✅ Reload OK.${NC}"; pause ;;
-      13) nginx -t && systemctl restart nginx; echo -e "${GRN}✅ Restart OK.${NC}"; pause ;;
+      1) wizard_setup; pause ;;
+      2) list_domains; pause ;;
+      3) add_domain; pause ;;
+      4) list_backends_for_domain; pause ;;
+      5) add_or_update_backend; pause ;;
+      6) delete_backend; pause ;;
+      7) healthcheck_all; pause ;;
+      8) rate_limit_menu; pause ;;
+      9) set_balance_mode; pause ;;
+      10) limits_menu; pause ;;
+      11) traffic_menu; pause ;;
+      12) backup_bundle; pause ;;
+      13) restore_bundle; pause ;;
+      14) nginx_test_reload; echo -e "${GRN}✅ Reload OK.${NC}"; pause ;;
+      15) nginx -t && systemctl restart nginx; echo -e "${GRN}✅ Restart OK.${NC}"; pause ;;
       0) exit 0 ;;
       *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
     esac
@@ -579,6 +701,3 @@ main() {
 }
 
 main
-EOF
-
-chmod +x /usr/local/bin/backendmgr
