@@ -2,14 +2,11 @@
 set -euo pipefail
 
 APP_TITLE="Backend Manager Nenenet 3.0"
-
-# >>>> CAMBIÁ ESTO SOLO SI MOVÉS EL REPO/BRANCH
 REPO_RAW_BASE="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/main"
-# <<<<
 
 ETC_DIR="/etc/backendmgr"
-REAL_NGINX_PATH_FILE="${ETC_DIR}/real_nginx_path"
 CFG="${ETC_DIR}/config.json"
+REAL_NGINX_PATH_FILE="${ETC_DIR}/real_nginx_path"
 
 PANEL_BIN_DST="/usr/local/bin/backendmgr"
 WRAPPER="/usr/local/bin/nginx"
@@ -19,11 +16,13 @@ NGX_MAIN_INCLUDE="${NGX_DIR}/backendmgr.conf"
 NGX_BACKENDS_MAP="${NGX_DIR}/backends.map"
 NGX_DOMAINS_MAP="${NGX_DIR}/domains.map"
 NGX_DEFAULTS_MAP="${NGX_DIR}/defaults.map"
+
 NGX_LOGGING_SNIP="${NGX_DIR}/logging.conf"
 NGX_APPLY_SNIP="${NGX_DIR}/apply.conf"
 
 NGX_BALANCER_CONF="${NGX_DIR}/balancer.conf"
 NGX_BALANCED_MAP="${NGX_DIR}/balanced.map"
+
 NGX_LIMITS_IP="${NGX_DIR}/limits_ip.map"
 NGX_LIMITS_BACKEND="${NGX_DIR}/limits_backend.map"
 NGX_LIMITS_URL="${NGX_DIR}/limits_url.map"
@@ -59,12 +58,13 @@ menu() {
   echo "   🚀 ${APP_TITLE}"
   echo "==============================================================="
   echo
-  echo "Este instalador hace:"
+  echo "Instala:"
   echo "  ✅ Panel TUI (comando: nginx)"
   echo "  ✅ Multi-dominio (server_name → backends separados)"
+  echo "  ✅ Wizard inicial (1 dominio + 1 backend)"
   echo "  ✅ Healthcheck (HTTP + latencia)"
   echo "  ✅ Balanceador: OFF / RANDOM / STICKY-IP"
-  echo "  ✅ Limitador de velocidad: por IP / Backend / URL (0=sin límite)"
+  echo "  ✅ Limitador de velocidad: IP / Backend / URL (0=sin límite)"
   echo "  ✅ Tráfico por IP o Backend + velocidad"
   echo "  ✅ Backup completo + Restore"
   echo
@@ -81,28 +81,10 @@ menu() {
   echo
 }
 
-install_or_update() {
-  need_root
-  download_panel_to_tmp
-
-  echo "[1/9] Dependencias..."
-  export DEBIAN_FRONTEND=noninteractive
-  apt update -y
-  apt install -y nginx curl jq gawk sed grep coreutils iproute2 net-tools nano
-
-  echo "[2/9] Directorios..."
+write_base_files() {
   mkdir -p "$ETC_DIR" "$NGX_DIR" "$BACKUP_DIR" /var/lib/backendmgr
   chmod 700 "$BACKUP_DIR"
 
-  echo "[3/9] Instalando panel..."
-  install -m 0755 "$PANEL_BIN_SRC" "$PANEL_BIN_DST"
-
-  echo "[4/9] Guardando ruta del nginx real..."
-  REAL_NGINX="$(command -v nginx || true)"
-  [[ -n "${REAL_NGINX:-}" ]] || REAL_NGINX="/usr/sbin/nginx"
-  echo "$REAL_NGINX" > "$REAL_NGINX_PATH_FILE"
-
-  echo "[5/9] Config base..."
   if [[ ! -f "$CFG" ]]; then
     cat > "$CFG" <<'EOF'
 {
@@ -120,27 +102,27 @@ install_or_update() {
   "curl_timeout_seconds": 8,
 
   "traffic_window_seconds": 60,
-  "stats_log_path": "/var/log/nginx/backendmgr.stats.log",
-
-  "auto_migrate_from_single_map": true
+  "stats_log_path": "/var/log/nginx/backendmgr.stats.log"
 }
 EOF
   fi
 
-  NGINX_CONF="$(jq -r '.nginx_conf' "$CFG")"
-
-  echo "[6/9] Snippets Nginx..."
-  [[ -f "$NGX_DOMAINS_MAP" ]] || cat > "$NGX_DOMAINS_MAP" <<'EOF'
-map $host $backend_domain { default "_default"; }
+  # Multilínea SIEMPRE (para que el panel pueda insertar líneas)
+  cat > "$NGX_DOMAINS_MAP" <<'EOF'
+map $host $backend_domain {
+    default "_default";
+}
 EOF
 
-  [[ -f "$NGX_DEFAULTS_MAP" ]] || cat > "$NGX_DEFAULTS_MAP" <<'EOF'
-map $backend_domain $default_backend_url { default "http://127.0.0.1:8880"; }
+  cat > "$NGX_DEFAULTS_MAP" <<'EOF'
+map $backend_domain $default_backend_url {
+    default "http://127.0.0.1:8880";
+}
 EOF
 
   [[ -f "$NGX_BACKENDS_MAP" ]] || : > "$NGX_BACKENDS_MAP"
 
-  [[ -f "$NGX_LOGGING_SNIP" ]] || cat > "$NGX_LOGGING_SNIP" <<'EOF'
+  cat > "$NGX_LOGGING_SNIP" <<'EOF'
 log_format backendmgr_stats '$time_local|$remote_addr|$host|$backend_domain|$http_backend|$upstream_addr|$status|$body_bytes_sent|$request_time|$upstream_response_time|$request';
 EOF
 
@@ -150,11 +132,15 @@ EOF
 # include /etc/nginx/conf.d/backendmgr/apply.conf;
 EOF
 
-  [[ -f "$NGX_BALANCER_CONF" ]] || cat > "$NGX_BALANCER_CONF" <<'EOF'
-# backendmgr balancer.conf (default OFF)
+  # FIX: balancer.conf sin "set" (válido en http{})
+  cat > "$NGX_BALANCER_CONF" <<'EOF'
+# backendmgr balancer.conf (balance OFF)
 map $host $backendmgr_balance { default 0; }
-set $backendmgr_slot "0";
-map "$backend_domain:$backendmgr_slot" $balanced_backend_url { default $default_backend_url; }
+map $host $backendmgr_slot { default "0"; }
+
+map "$backend_domain:$backendmgr_slot" $balanced_backend_url {
+    default $default_backend_url;
+}
 EOF
 
   [[ -f "$NGX_BALANCED_MAP" ]] || : > "$NGX_BALANCED_MAP"
@@ -163,26 +149,54 @@ EOF
   [[ -f "$NGX_LIMITS_URL" ]] || : > "$NGX_LIMITS_URL"
 
   [[ -f "$NGX_MAIN_INCLUDE" ]] || cat > "$NGX_MAIN_INCLUDE" <<EOF
+# ==========================================================
+# Backend Manager Nenenet 3.0 - include principal (http{})
+# ==========================================================
 include ${NGX_LOGGING_SNIP};
 include ${NGX_DOMAINS_MAP};
 include ${NGX_DEFAULTS_MAP};
 
 map "\$backend_domain:\$http_backend" \$backend_url {
-  default \$default_backend_url;
-  include ${NGX_BACKENDS_MAP};
+    default \$default_backend_url;
+    include ${NGX_BACKENDS_MAP};
 }
 
+# req/conn rate-limit
 limit_req_zone \$binary_remote_addr zone=backendmgr_req:10m rate=10r/s;
 limit_conn_zone \$binary_remote_addr zone=backendmgr_conn:10m;
 
+# Balanceador
 include ${NGX_BALANCER_CONF};
 
+# Speed limits (0 = unlimited)
 map \$remote_addr \$ip_limit_rate { default 0; include ${NGX_LIMITS_IP}; }
 map "\$backend_domain:\$http_backend" \$backend_limit_rate { default 0; include ${NGX_LIMITS_BACKEND}; }
 map \$backend_url \$url_limit_rate { default 0; include ${NGX_LIMITS_URL}; }
 EOF
+}
 
-  echo "[7/9] Conectando include en nginx.conf (http {})..."
+install_or_update() {
+  need_root
+  download_panel_to_tmp
+
+  echo "[1/9] Dependencias..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt update -y
+  apt install -y nginx curl jq gawk sed grep coreutils iproute2 net-tools nano
+
+  echo "[2/9] Directorios y archivos base..."
+  write_base_files
+
+  echo "[3/9] Instalando panel..."
+  install -m 0755 "$PANEL_BIN_SRC" "$PANEL_BIN_DST"
+
+  echo "[4/9] Guardando ruta del nginx real..."
+  REAL_NGINX="$(command -v nginx || true)"
+  [[ -n "${REAL_NGINX:-}" ]] || REAL_NGINX="/usr/sbin/nginx"
+  echo "$REAL_NGINX" > "$REAL_NGINX_PATH_FILE"
+
+  echo "[5/9] Conectando include en nginx.conf (http {})..."
+  NGINX_CONF="$(jq -r '.nginx_conf' "$CFG")"
   grep -qF "include ${NGX_MAIN_INCLUDE};" "$NGINX_CONF" || {
     backup_file "$NGINX_CONF"
     awk -v inc="    include ${NGX_MAIN_INCLUDE};" '
@@ -195,7 +209,7 @@ EOF
     ' "$NGINX_CONF" > "${NGINX_CONF}.tmp" && mv "${NGINX_CONF}.tmp" "$NGINX_CONF"
   }
 
-  echo "[8/9] Wrapper 'nginx' (panel + passthrough nginx real)..."
+  echo "[6/9] Wrapper 'nginx' (panel + passthrough nginx real)..."
   backup_file "$WRAPPER"
   cat > "$WRAPPER" <<'EOF'
 #!/usr/bin/env bash
@@ -205,36 +219,47 @@ CFG_REAL="/etc/backendmgr/real_nginx_path"
 REAL="/usr/sbin/nginx"
 [[ -f "$CFG_REAL" ]] && REAL="$(cat "$CFG_REAL" 2>/dev/null || echo /usr/sbin/nginx)"
 
+# Sin args => panel
 if [[ $# -eq 0 ]]; then
   exec /usr/local/bin/backendmgr
 fi
 
+# Alias explícitos
 case "${1:-}" in
   menu|panel|nenenet) exec /usr/local/bin/backendmgr ;;
 esac
 
+# Flags típicos de nginx => nginx real
 case "${1:-}" in
   -t|-T|-V|-v|-h|-s|-q|-c|-p|-g) exec "$REAL" "$@" ;;
 esac
 
+# Default => nginx real
 exec "$REAL" "$@"
 EOF
   chmod +x "$WRAPPER"
 
-  echo "[9/9] Validando Nginx..."
+  echo "[7/9] Validando Nginx..."
   nginx -t
   systemctl enable nginx >/dev/null 2>&1 || true
   systemctl reload nginx
 
+  echo "[8/9] Listo."
   echo
   echo "✅ Instalación/Actualización completa."
-  echo
   echo "Abrir panel:   sudo nginx"
-  echo "Probar config: sudo nginx -t"
   echo
   echo "📌 Para aplicar balance/limits/stats AL TRÁFICO REAL:"
-  echo "En tu location / agregá:"
+  echo "Agregá dentro de tu location / :"
   echo "  include /etc/nginx/conf.d/backendmgr/apply.conf;"
+  echo
+
+  echo "[9/9] Abrir panel y configurar ahora..."
+  read -r -p "¿Abrir panel ahora? (Y/n): " ans
+  ans="${ans:-Y}"
+  if [[ "$ans" =~ ^[Yy]$ ]]; then
+    exec /usr/local/bin/backendmgr
+  fi
 }
 
 uninstall_now() {
