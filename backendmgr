@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_NAME="Backend Manager Nenenet 3.0"
-APP_VER="4.0"
+APP_VER="4.1"
 
 CFG_FILE="/etc/backendmgr/config.json"
 BACKUP_DIR="/root/backendmgr-backups"
@@ -87,7 +87,7 @@ quick_status() {
   n_backends="$(grep -E '^\s*"[A-Za-z0-9_.:-]+"\s+"http://' "$NGX_BACKENDS_MAP" 2>/dev/null | wc -l | tr -d ' ' || echo 0)"
   n_servers="$(ls -1 "${SERVERS_DIR}"/*.conf 2>/dev/null | wc -l | tr -d ' ' || echo 0)"
   echo -e "${WHT}📊 ESTADO${NC}"
-  echo -e "   🌐 Dominios (servers): ${GRN}${n_servers}${NC} | Backends: ${GRN}${n_backends}${NC}"
+  echo -e "   🌍 Dominios madre (servers): ${GRN}${n_servers}${NC} | Backends: ${GRN}${n_backends}${NC}"
   echo -e "   ⚖️ Balance: ${GRN}${BAL_MODE}${NC}"
   echo -e "   🛡️ Rate limit: ${GRN}${RL_ENABLED}${NC} (${RL_RATE}, burst ${RL_BURST}, conn ${CONN_LIMIT})"
   echo -e "   📈 Stats log: ${DIM}${STATS_LOG}${NC}"
@@ -154,15 +154,20 @@ add_other_domain() {
   return 0
 }
 
+# ✅ CAMBIO PEDIDO:
+# Opción 4 SOLO backend + IP + puerto (sin dominios madre / sin host)
 list_backends_general() {
-  echo -e "${CYA}Lista general de backends (nombre / IP / puerto)${NC}\n"
+  echo -e "${CYA}Lista de backends (backend / IP / puerto)${NC}"
+  echo -e "${DIM}Estos son los destinos directos (IP fija + puerto). Los dominios madre se ven en la opción 5.${NC}\n"
+
   printf "%-4s %-22s %-18s %-6s\n" "#" "BACKEND" "IP" "PORT"
   echo "--------------------------------------------------------------"
 
-  i=0
+  local i=0
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     i=$((i+1))
+    local key url ipport ip port
     key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
     url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
     ipport="${url#http://}"
@@ -171,19 +176,20 @@ list_backends_general() {
     printf "%-4s %-22s %-18s %-6s\n" "$i" "$key" "$ip" "$port"
   done < <(backend_lines)
 
-  echo
-  echo -e "${DIM}Tip: en cada server, dentro de location / debe estar:${NC}"
-  echo -e "${DIM}     include /etc/nginx/conf.d/backendmgr/apply.conf;${NC}"
+  if [[ "$i" -eq 0 ]]; then
+    echo -e "${YLW}No hay backends cargados todavía.${NC}"
+  fi
+
   return 0
 }
 
 list_domains() {
-  echo -e "${CYA}Dominios (servers creados)${NC}"
+  echo -e "${CYA}Dominios madre (servers creados)${NC}"
   echo -e "${DIM}Ruta: ${SERVERS_DIR}/*.conf${NC}\n"
 
   mapfile -t files < <(server_files)
   if [[ "${#files[@]}" -eq 0 ]]; then
-    echo -e "${YLW}No hay servers creados todavía.${NC}"
+    echo -e "${YLW}No hay dominios madre creados todavía.${NC}"
     echo -e "${DIM}Usá la opción 9 para crear uno.${NC}"
     return 0
   fi
@@ -191,7 +197,7 @@ list_domains() {
   printf "%-4s %-30s %-8s %-10s %-10s %-10s\n" "#" "DOMINIO" "LISTEN" "C_CONN" "S_SEND" "R_READ"
   echo "-------------------------------------------------------------------------------------"
 
-  idx=0
+  local idx=0
   for f in "${files[@]}"; do
     idx=$((idx+1))
     dom="$(grep -E '^\s*server_name\s+' "$f" 2>/dev/null | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
@@ -216,7 +222,7 @@ delete_backend_pick() {
     return 0
   fi
 
-  idx=0
+  local idx=0
   for line in "${lines[@]}"; do
     idx=$((idx+1))
     key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
@@ -243,7 +249,7 @@ delete_backend_pick() {
 }
 
 healthcheck_all() {
-  echo -e "${CYA}Healthcheck (estado HTTP y latencia)${NC}"
+  echo -e "${CYA}Healthcheck (HTTP y latencia)${NC}"
   echo -e "${DIM}• HTTP 000 = no responde/timeout • Lat(ms)=milisegundos • timeout curl: ${CURL_TMO}s${NC}\n"
   printf "%-22s %-18s %-6s %-6s %-10s\n" "BACKEND" "IP" "PORT" "HTTP" "LAT(ms)"
   echo "------------------------------------------------------------------"
@@ -276,9 +282,9 @@ rate_limit_menu() {
   echo -e "${CYA}Rate limit (Rate limiting) - protección básica en Nginx${NC}"
   echo -e "${DIM}Limita requests por IP y conexiones simultáneas (anti-abuso).${NC}\n"
   echo "Estado:     $RL_ENABLED"
-  echo "Rate:       $RL_RATE     (requests/seg por IP)"
-  echo "Burst:      $RL_BURST    (ráfaga permitida)"
-  echo "Conn limit: $CONN_LIMIT  (conexiones simultáneas por IP)"
+  echo "Rate:       $RL_RATE"
+  echo "Burst:      $RL_BURST"
+  echo "Conn limit: $CONN_LIMIT"
   echo
   echo "1) Activar / Desactivar"
   echo "2) Cambiar rate (ej: 10r/s)"
@@ -329,12 +335,8 @@ write_apply_conf() {
 
   cat > "$NGX_APPLY_SNIP" <<EOF
 # ${APP_NAME} apply.conf
-# Incluir dentro de location / :
-# include /etc/nginx/conf.d/backendmgr/apply.conf;
-
 access_log ${STATS_LOG} backendmgr_stats;
 
-# Balance: si está activo, pisa backend_url por el balanceado
 if (\$backendmgr_balance = 1) {
     set \$backend_url \$balanced_backend_url;
 }
@@ -354,14 +356,10 @@ EOF
   fi
 
   cat >> "$NGX_APPLY_SNIP" <<'EOF'
-# Speed limits (0 = unlimited)
-# prioridad: Backend(key) > URL(actual) > IP
 set $nenenet_rate 0;
-
 if ($backend_limit_rate != 0) { set $nenenet_rate $backend_limit_rate; }
 if ($nenenet_rate = 0) { if ($url_limit_rate != 0) { set $nenenet_rate $url_limit_rate; } }
 if ($nenenet_rate = 0) { if ($ip_limit_rate != 0) { set $nenenet_rate $ip_limit_rate; } }
-
 limit_rate $nenenet_rate;
 EOF
   return 0
@@ -415,7 +413,6 @@ server {
     access_log /var/log/nginx/${safe}.access.log;
     error_log  /var/log/nginx/${safe}.error.log;
 
-    # Opcional: timeouts largos para backend
     proxy_connect_timeout ${v1};
     proxy_send_timeout    ${v2};
     proxy_read_timeout    ${v3};
@@ -474,7 +471,7 @@ delete_domain_pick() {
     return 0
   fi
 
-  idx=0
+  local idx=0
   for f in "${files[@]}"; do
     idx=$((idx+1))
     dom="$(grep -E '^\s*server_name\s+' "$f" 2>/dev/null | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
@@ -509,6 +506,7 @@ rebuild_balancer_files() {
   local i=0
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
+    local url
     url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
     printf "    \"%s\" \"%s\";\n" "$i" "$url" >> "$NGX_BALANCED_MAP"
     i=$((i+1))
@@ -517,7 +515,6 @@ rebuild_balancer_files() {
 
   if [[ $i -lt 2 || "$BAL_MODE" == "off" ]]; then
     cat > "$NGX_BALANCER_CONF" <<'EOF'
-# backendmgr balancer.conf (balance OFF)
 map $host $backendmgr_balance { default 0; }
 map $host $backendmgr_slot { default "0"; }
 map $backendmgr_slot $balanced_backend_url {
@@ -534,7 +531,6 @@ EOF
   [[ "$BAL_MODE" == "random" ]] && split_key='$remote_addr$msec$connection'
 
   {
-    echo "# backendmgr balancer.conf (balance: ${BAL_MODE})"
     echo "map \$host \$backendmgr_balance { default 1; }"
     echo "split_clients \"${split_key}\" \$backendmgr_slot {"
     for ((n=0;n<i;n++)); do
@@ -554,7 +550,7 @@ EOF
 
 set_balance_mode() {
   echo -e "${CYA}Balanceador (Load balancing)${NC}"
-  echo -e "${DIM}• OFF: usa header Backend (tu modo actual). • RANDOM: reparte por request. • STICKY-IP: por IP.${NC}\n"
+  echo -e "${DIM}• OFF: usa header Backend • RANDOM: reparte por request • STICKY-IP: por IP.${NC}\n"
   echo "1) OFF"
   echo "2) RANDOM"
   echo "3) STICKY-IP (iphash)"
@@ -720,8 +716,8 @@ menu() {
   echo "  1) 🌐 Configurar dominio madre principal (ej: cpu2.elnene.site)"
   echo "  2) ➕ Agregar backend (nombre + IP + puerto)"
   echo "  3) 🌐 Agregar otro dominio madre (ej: cpu2.nenenet.site)"
-  echo "  4) 📄 Listar backends (nombre + IP + puerto)"
-  echo "  5) 🌍 Listar dominios (servers creados)"
+  echo "  4) 📄 Listar backends (backend / IP / puerto)"
+  echo "  5) 🌍 Listar dominios madre (servers creados)"
   echo "  6) 🗑️  Eliminar backend (elegir de lista)"
   echo "  7) ✅ Healthcheck (HTTP y latencia)"
   echo "  8) 🛡️ Rate limit (protección) (Rate limiting)"
