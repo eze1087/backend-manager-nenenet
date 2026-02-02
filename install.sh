@@ -1,318 +1,247 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="Backend Manager Nenenet 3.0"
-APP_VER="3.7"
+APP_TITLE="Backend Manager Nenenet 3.0"
+REPO_RAW_BASE="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main"
 
-CFG_FILE="/etc/backendmgr/config.json"
-BACKUP_DIR="/root/backendmgr-backups"
+ETC_DIR="/etc/backendmgr"
+CFG_FILE="${ETC_DIR}/config.json"
+REAL_NGINX_PATH_FILE="${ETC_DIR}/real_nginx_path"
+
+PANEL_BIN_DST="/usr/local/bin/backendmgr"
+WRAPPER_BIN="/usr/local/bin/nginx"
 
 NGX_DIR="/etc/nginx/conf.d/backendmgr"
+SERVERS_DIR="${NGX_DIR}/servers"
+
 NGX_MAIN_INCLUDE="${NGX_DIR}/backendmgr.conf"
 NGX_BACKENDS_MAP="${NGX_DIR}/backends.map"
+NGX_LOGGING_SNIP="${NGX_DIR}/logging.conf"
 NGX_APPLY_SNIP="${NGX_DIR}/apply.conf"
 NGX_BALANCER_CONF="${NGX_DIR}/balancer.conf"
 NGX_BALANCED_MAP="${NGX_DIR}/balanced.map"
 NGX_LIMITS_IP="${NGX_DIR}/limits_ip.map"
 NGX_LIMITS_BACKEND="${NGX_DIR}/limits_backend.map"
 NGX_LIMITS_URL="${NGX_DIR}/limits_url.map"
-SERVERS_DIR="${NGX_DIR}/servers"
 
-NC='\033[0m'
-RED='\033[0;31m'
-GRN='\033[0;32m'
-YLW='\033[0;33m'
-CYA='\033[0;36m'
-WHT='\033[1;37m'
-DIM='\033[2m'
+BACKUP_DIR="/root/backendmgr-backups"
 
-need_root() { [[ ${EUID:-999} -eq 0 ]] || { echo -e "${RED}ERROR:${NC} ejecutá: sudo nginx"; exit 1; }; }
-pause() { echo; read -r -p "Enter para volver al menú..." _; }
+need_root() { [[ ${EUID:-999} -eq 0 ]] || { echo "ERROR: ejecutá como root (sudo)."; exit 1; }; }
 
-# ✅ CLAVE: nunca cortar el menú por fallos/locks de nginx
-nginx_test_reload() {
-  if ! timeout 8s nginx -t; then
-    echo -e "${YLW}⚠️ nginx -t falló o tardó demasiado. No hago reload.${NC}"
-    return 0
-  fi
+backup_file() {
+  local f="$1"
+  mkdir -p "$BACKUP_DIR"
+  [[ -f "$f" ]] && cp -a "$f" "${BACKUP_DIR}/$(basename "$f").bak-$(date +%Y%m%d-%H%M%S)" || true
+}
+
+nginx_reload_safe() {
+  # Evita cuelgues con systemctl
   timeout 8s nginx -s reload >/dev/null 2>&1 || true
-  return 0
 }
 
-read_cfg() {
-  [[ -f "$CFG_FILE" ]] || { echo -e "${RED}Falta:${NC} $CFG_FILE"; return 0; }
-  HEADER_NAME="$(jq -r '.header_name' "$CFG_FILE")"
-  PRIMARY_DOMAIN="$(jq -r '.primary_domain' "$CFG_FILE")"
-  [[ "$PRIMARY_DOMAIN" == "null" ]] && PRIMARY_DOMAIN=""
-
-  RL_ENABLED="$(jq -r '.rate_limit_enabled' "$CFG_FILE")"
-  RL_RATE="$(jq -r '.rate_limit_rate' "$CFG_FILE")"
-  RL_BURST="$(jq -r '.rate_limit_burst' "$CFG_FILE")"
-  CONN_LIMIT="$(jq -r '.conn_limit' "$CFG_FILE")"
-
-  CURL_TMO="$(jq -r '.curl_timeout_seconds' "$CFG_FILE")"
-  BAL_MODE="$(jq -r '.balance_mode' "$CFG_FILE")"
-  BAL_CAP="$(jq -r '.balance_max_slots_cap' "$CFG_FILE")"
-
-  STATS_LOG="$(jq -r '.stats_log_path' "$CFG_FILE")"
+download_panel() {
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp" >/dev/null 2>&1 || true' RETURN
+  curl -fsSL "${REPO_RAW_BASE}/backendmgr" -o "${tmp}/backendmgr"
+  chmod +x "${tmp}/backendmgr"
+  install -m 0755 "${tmp}/backendmgr" "${PANEL_BIN_DST}"
 }
 
-ensure_files() {
-  mkdir -p "$NGX_DIR" "$SERVERS_DIR" /var/log/nginx /var/lib/backendmgr "$BACKUP_DIR"
+write_base_files() {
+  mkdir -p "$ETC_DIR" "$NGX_DIR" "$SERVERS_DIR" "$BACKUP_DIR" /var/lib/backendmgr /var/log/nginx
   chmod 700 "$BACKUP_DIR" || true
-  for f in "$NGX_MAIN_INCLUDE" "$NGX_BACKENDS_MAP" "$NGX_APPLY_SNIP" "$NGX_BALANCER_CONF" "$NGX_BALANCED_MAP" \
-           "$NGX_LIMITS_IP" "$NGX_LIMITS_BACKEND" "$NGX_LIMITS_URL"
-  do
-    [[ -f "$f" ]] || : > "$f"
-  done
+
+  if [[ ! -f "$CFG_FILE" ]]; then
+    cat > "$CFG_FILE" <<'JSON'
+{
+  "nginx_conf": "/etc/nginx/nginx.conf",
+  "header_name": "Backend",
+  "primary_domain": "",
+
+  "balance_mode": "off",
+  "balance_max_slots_cap": 64,
+
+  "rate_limit_enabled": true,
+  "rate_limit_rate": "10r/s",
+  "rate_limit_burst": 20,
+  "conn_limit": 30,
+
+  "curl_timeout_seconds": 8,
+  "traffic_window_seconds": 60,
+  "stats_log_path": "/var/log/nginx/backendmgr.stats.log"
 }
-
-banner() {
-  clear || true
-  echo -e "${CYA}╔══════════════════════════════════════════════════════════════╗${NC}"
-  echo -e "${CYA}║${NC}  🚀 ${APP_NAME}  v${APP_VER}                                   ${CYA}║${NC}"
-  echo -e "${CYA}║${NC}  Dominio madre principal: ${WHT}${PRIMARY_DOMAIN:-"(no configurado)"}${NC} | Header: ${WHT}${HEADER_NAME:-Backend}${NC} ${CYA}║${NC}"
-  echo -e "${CYA}╚══════════════════════════════════════════════════════════════╝${NC}"
-  echo
-}
-
-quick_status() {
-  echo -e "${WHT}📊 ESTADO${NC}"
-  echo -e "   🌐 Dominio madre principal: ${GRN}${PRIMARY_DOMAIN:-"(no configurado)"}${NC}"
-  echo -e "   ⚖️ Balance: ${GRN}${BAL_MODE}${NC}"
-  echo -e "   🛡️ Rate limit: ${GRN}${RL_ENABLED}${NC} (${RL_RATE}, burst ${RL_BURST}, conn ${CONN_LIMIT})"
-  echo -e "   📈 Stats log: ${DIM}${STATS_LOG}${NC}"
-  echo
-}
-
-validate_domain() { [[ "$1" =~ ^[A-Za-z0-9.-]{3,253}$ ]]; }
-validate_key() { [[ "$1" =~ ^[A-Za-z0-9_.:-]{2,64}$ ]]; }
-validate_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
-
-backend_lines() { grep -E '^\s*"[A-Za-z0-9_.:-]+"\s+"http://' "$NGX_BACKENDS_MAP" 2>/dev/null || true; }
-server_files() { ls -1 "${SERVERS_DIR}"/*.conf 2>/dev/null || true; }
-
-set_primary_domain() {
-  echo -e "${CYA}Configurar dominio madre principal${NC}"
-  echo -e "${DIM}Ejemplo: cpu2.elnene.site${NC}"
-  read -r -p "Dominio madre principal: " dom
-  validate_domain "$dom" || { echo -e "${RED}Dominio inválido.${NC}"; return 0; }
-  jq --arg v "$dom" '.primary_domain = $v' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
-  read_cfg
-  echo -e "${GRN}✅ Guardado.${NC}"
-  return 0
-}
-
-add_backend() {
-  echo -e "${CYA}Agregar backend (nombre + IP + puerto)${NC}"
-  echo -e "${DIM}Ejemplo: backend=svpnene38 | IP=179.43.112.38 | Puerto=80${NC}"
-  echo
-  read -r -p "Nombre del backend (ej: svpnene38): " key
-  validate_key "$key" || { echo -e "${RED}Nombre backend inválido.${NC}"; return 0; }
-
-  read -r -p "IP (ej: 179.43.112.38): " ip
-  validate_ip "$ip" || { echo -e "${RED}IP inválida.${NC}"; return 0; }
-
-  read -r -p "Puerto (ej: 80): " port
-  [[ "$port" =~ ^[0-9]{2,5}$ ]] || { echo -e "${RED}Puerto inválido.${NC}"; return 0; }
-
-  url="http://${ip}:${port}"
-
-  if grep -qE "^\s*\"${key}\"" "$NGX_BACKENDS_MAP"; then
-    awk -v k="$key" -v url="$url" '{ re="^[ \t]*\""k"\""; if($0 ~ re){ sub(/"http:\/\/[^"]+"/, "\""url"\"") } print }' \
-      "$NGX_BACKENDS_MAP" > "${NGX_BACKENDS_MAP}.tmp" && mv "${NGX_BACKENDS_MAP}.tmp" "$NGX_BACKENDS_MAP"
-    echo -e "${GRN}✅ Backend actualizado:${NC} ${key} -> ${ip}:${port}"
-  else
-    printf "    \"%s\" \"%s\";\n" "$key" "$url" >> "$NGX_BACKENDS_MAP"
-    echo -e "${GRN}✅ Backend agregado:${NC} ${key} -> ${ip}:${port}"
+JSON
   fi
 
-  rebuild_balancer_files >/dev/null 2>&1 || true
-  write_apply_conf >/dev/null 2>&1 || true
-  nginx_test_reload
-  return 0
-}
+  [[ -f "$NGX_BACKENDS_MAP" ]] || : > "$NGX_BACKENDS_MAP"
+  [[ -f "$NGX_BALANCED_MAP" ]] || : > "$NGX_BALANCED_MAP"
+  [[ -f "$NGX_LIMITS_IP" ]] || : > "$NGX_LIMITS_IP"
+  [[ -f "$NGX_LIMITS_BACKEND" ]] || : > "$NGX_LIMITS_BACKEND"
+  [[ -f "$NGX_LIMITS_URL" ]] || : > "$NGX_LIMITS_URL"
 
-list_backends_general() {
-  echo -e "${CYA}Lista general de backends${NC}\n"
-  printf "%-4s %-22s %-18s %-6s\n" "#" "BACKEND" "IP" "PORT"
-  echo "--------------------------------------------------------------"
-  i=0
-  backend_lines | while read -r line; do
-    i=$((i+1))
-    key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
-    url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
-    ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
-    printf "%-4s %-22s %-18s %-6s\n" "$i" "$key" "$ip" "$port"
-  done
-  return 0
-}
-
-delete_backend_pick() {
-  echo -e "${CYA}Eliminar backend (elegir de lista)${NC}\n"
-  mapfile -t lines < <(backend_lines)
-  if [[ "${#lines[@]}" -eq 0 ]]; then
-    echo -e "${YLW}No hay backends cargados.${NC}"
-    return 0
-  fi
-
-  idx=0
-  for line in "${lines[@]}"; do
-    idx=$((idx+1))
-    key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
-    url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
-    ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
-    printf "%-3s) %-22s -> %s:%s\n" "$idx" "$key" "$ip" "$port"
-  done
-
-  echo
-  read -r -p "Número a eliminar: " n
-  [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${RED}Número inválido.${NC}"; return 0; }
-  (( n>=1 && n<=${#lines[@]} )) || { echo -e "${RED}Fuera de rango.${NC}"; return 0; }
-
-  target="${lines[$((n-1))]}"
-  grep -vF "$target" "$NGX_BACKENDS_MAP" > "${NGX_BACKENDS_MAP}.tmp" && mv "${NGX_BACKENDS_MAP}.tmp" "$NGX_BACKENDS_MAP"
-
-  rebuild_balancer_files >/dev/null 2>&1 || true
-  write_apply_conf >/dev/null 2>&1 || true
-  nginx_test_reload
-  echo -e "${GRN}✅ Backend eliminado.${NC}"
-  return 0
-}
-
-healthcheck_all() {
-  echo -e "${CYA}Healthcheck (HTTP y latencia)${NC}"
-  echo -e "${DIM}Timeout curl: ${CURL_TMO}s  (000 = no responde)${NC}\n"
-  printf "%-22s %-18s %-6s %-6s %-10s\n" "BACKEND" "IP" "PORT" "HTTP" "LAT(ms)"
-  echo "------------------------------------------------------------------"
-  backend_lines | while read -r line; do
-    key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
-    url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
-    ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
-    out="$(curl -m "$CURL_TMO" -s -o /dev/null -w "%{http_code} %{time_total}" "${url}/" || echo "000 9.999")"
-    code="$(echo "$out" | awk '{print $1}')"
-    t="$(echo "$out" | awk '{print $2}')"
-    ms="$(awk -v x="$t" 'BEGIN{printf "%.0f", x*1000}')"
-    printf "%-22s %-18s %-6s %-6s %-10s\n" "$key" "$ip" "$port" "$code" "$ms"
-  done
-  return 0
-}
-
-rewrite_rate_zone() {
-  if grep -qE '^\s*limit_req_zone\s+\$binary_remote_addr\s+zone=backendmgr_req:10m\s+rate=' "$NGX_MAIN_INCLUDE"; then
-    awk -v rate="$RL_RATE" '
-      { if($0 ~ /^\s*limit_req_zone\s+\$binary_remote_addr\s+zone=backendmgr_req:10m\s+rate=/){ sub(/rate=[^;]+;/, "rate="rate";") } print }
-    ' "$NGX_MAIN_INCLUDE" > "${NGX_MAIN_INCLUDE}.tmp" && mv "${NGX_MAIN_INCLUDE}.tmp" "$NGX_MAIN_INCLUDE"
-  fi
-}
-
-write_apply_conf() {
-  read_cfg
-  rewrite_rate_zone >/dev/null 2>&1 || true
-  cat > "$NGX_APPLY_SNIP" <<EOF
-# ${APP_NAME} apply.conf
-access_log ${STATS_LOG} backendmgr_stats;
-
-if (\$backendmgr_balance = 1) {
-    set \$backend_url \$balanced_backend_url;
-}
+  cat > "$NGX_LOGGING_SNIP" <<'EOF'
+log_format backendmgr_stats '$time_local|$remote_addr|$host|$http_backend|$upstream_addr|$status|$body_bytes_sent|$request_time|$upstream_response_time|$request';
 EOF
 
-  if [[ "$RL_ENABLED" == "true" ]]; then
-    cat >> "$NGX_APPLY_SNIP" <<EOF
-limit_req zone=backendmgr_req burst=${RL_BURST} nodelay;
-limit_conn backendmgr_conn ${CONN_LIMIT};
+  [[ -f "$NGX_APPLY_SNIP" ]] || cat > "$NGX_APPLY_SNIP" <<'EOF'
+# Backend Manager Nenenet 3.0 apply.conf
+# Incluir dentro de location / :
+# include /etc/nginx/conf.d/backendmgr/apply.conf;
 EOF
-  fi
 
-  cat >> "$NGX_APPLY_SNIP" <<'EOF'
-set $nenenet_rate 0;
-if ($backend_limit_rate != 0) { set $nenenet_rate $backend_limit_rate; }
-if ($nenenet_rate = 0) { if ($url_limit_rate != 0) { set $nenenet_rate $url_limit_rate; } }
-if ($nenenet_rate = 0) { if ($ip_limit_rate != 0) { set $nenenet_rate $ip_limit_rate; } }
-limit_rate $nenenet_rate;
-EOF
-  return 0
-}
-
-rebuild_balancer_files() {
-  read_cfg
-  cap="$BAL_CAP"; [[ "$cap" =~ ^[0-9]+$ ]] || cap=64
-  : > "$NGX_BALANCED_MAP"
-  i=0
-  while read -r line; do
-    url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
-    printf "    \"%s\" \"%s\";\n" "$i" "$url" >> "$NGX_BALANCED_MAP"
-    i=$((i+1))
-    [[ $i -ge $cap ]] && break
-  done < <(backend_lines)
-
-  if [[ $i -lt 2 || "$BAL_MODE" == "off" ]]; then
-    cat > "$NGX_BALANCER_CONF" <<'EOF'
+  cat > "$NGX_BALANCER_CONF" <<'EOF'
+# backendmgr balancer.conf (balance OFF)
 map $host $backendmgr_balance { default 0; }
 map $host $backendmgr_slot { default "0"; }
+
 map $backendmgr_slot $balanced_backend_url {
     default $backend_url;
     include /etc/nginx/conf.d/backendmgr/balanced.map;
 }
 EOF
-    return 0
+
+  if [[ ! -f "$NGX_MAIN_INCLUDE" ]]; then
+    cat > "$NGX_MAIN_INCLUDE" <<EOF
+# Backend Manager Nenenet 3.0 - include principal (http{})
+include ${NGX_LOGGING_SNIP};
+
+map \$http_backend \$backend_url {
+    default "http://127.0.0.1:8880";
+    include ${NGX_BACKENDS_MAP};
+}
+
+limit_req_zone \$binary_remote_addr zone=backendmgr_req:10m rate=10r/s;
+limit_conn_zone \$binary_remote_addr zone=backendmgr_conn:10m;
+
+include ${NGX_BALANCER_CONF};
+
+map \$remote_addr \$ip_limit_rate { default 0; include ${NGX_LIMITS_IP}; }
+map \$http_backend \$backend_limit_rate { default 0; include ${NGX_LIMITS_BACKEND}; }
+map \$backend_url \$url_limit_rate { default 0; include ${NGX_LIMITS_URL}; }
+
+include ${SERVERS_DIR}/*.conf;
+EOF
+  fi
+}
+
+connect_include_into_nginx_conf() {
+  local nginx_conf
+  nginx_conf="$(jq -r '.nginx_conf' "$CFG_FILE")"
+  [[ -f "$nginx_conf" ]] || { echo "No existe: $nginx_conf"; exit 1; }
+
+  if ! grep -qF "include ${NGX_MAIN_INCLUDE};" "$nginx_conf"; then
+    backup_file "$nginx_conf"
+    awk -v inc="    include ${NGX_MAIN_INCLUDE};" '
+      BEGIN{done=0}
+      /^\s*http\s*\{/{
+        print
+        if(!done){ print inc; done=1; next }
+      }
+      {print}
+    ' "$nginx_conf" > "${nginx_conf}.tmp" && mv "${nginx_conf}.tmp" "$nginx_conf"
+  fi
+}
+
+install_wrapper() {
+  local real
+  real="$(command -v nginx || true)"
+  [[ -n "${real:-}" ]] || real="/usr/sbin/nginx"
+  echo "$real" > "$REAL_NGINX_PATH_FILE"
+
+  backup_file "$WRAPPER_BIN"
+  cat > "$WRAPPER_BIN" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+CFG_REAL="/etc/backendmgr/real_nginx_path"
+REAL="/usr/sbin/nginx"
+[[ -f "$CFG_REAL" ]] && REAL="$(cat "$CFG_REAL" 2>/dev/null || echo /usr/sbin/nginx)"
+
+if [[ $# -eq 0 ]]; then
+  exec /usr/local/bin/backendmgr
+fi
+
+case "${1:-}" in
+  menu|panel|nenenet) exec /usr/local/bin/backendmgr ;;
+esac
+
+case "${1:-}" in
+  -t|-T|-V|-v|-h|-s|-q|-c|-p|-g) exec "$REAL" "$@" ;;
+esac
+
+exec "$REAL" "$@"
+EOF
+  chmod +x "$WRAPPER_BIN"
+}
+
+install_or_update() {
+  need_root
+  echo "[1/9] Dependencias..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt update -y
+  apt install -y nginx curl jq gawk sed grep coreutils iproute2 net-tools nano ufw timeout
+
+  echo "[2/9] Archivos base..."
+  write_base_files
+
+  echo "[3/9] Descargando panel..."
+  download_panel
+
+  echo "[4/9] Include en nginx.conf..."
+  connect_include_into_nginx_conf
+
+  echo "[5/9] Wrapper nginx..."
+  install_wrapper
+
+  echo "[6/9] Validando Nginx..."
+  if ! timeout 10s nginx -t; then
+    echo "⚠️ nginx -t falló o tardó demasiado. Revisá con: nginx -T"
+    exit 1
   fi
 
-  base=$((100 / i)); rem=$((100 - base * i))
-  split_key='$remote_addr'
-  [[ "$BAL_MODE" == "random" ]] && split_key='$remote_addr$msec$connection'
+  echo "[7/9] Reload Nginx..."
+  nginx_reload_safe
 
-  {
-    echo "map \$host \$backendmgr_balance { default 1; }"
-    echo "split_clients \"${split_key}\" \$backendmgr_slot {"
-    for ((n=0;n<i;n++)); do
-      pct="$base"; if (( rem > 0 )); then pct=$((pct+1)); rem=$((rem-1)); fi
-      echo "    ${pct}% \"${n}\";"
-    done
-    echo "}"
-    echo "map \$backendmgr_slot \$balanced_backend_url {"
-    echo "    default \$backend_url;"
-    echo "    include ${NGX_BALANCED_MAP};"
-    echo "}"
-  } > "$NGX_BALANCER_CONF"
-  return 0
+  echo "[8/9] Listo. Abrir panel: sudo nginx"
+  echo
+  echo "[9/9] Abrir panel ahora..."
+  read -r -p "¿Abrir panel ahora? (Y/n): " ans
+  ans="${ans:-Y}"
+  if [[ "$ans" =~ ^[Yy]$ ]]; then
+    exec /usr/local/bin/backendmgr
+  fi
+  echo "Fin."
+}
+
+uninstall_now() {
+  need_root
+  rm -f /usr/local/bin/backendmgr
+  rm -f /usr/local/bin/nginx
+  rm -rf /etc/backendmgr
+  echo "✅ Listo. (No borro /etc/nginx ni backups en /root/backendmgr-backups)"
 }
 
 menu() {
-  echo -e "${WHT}📌 MENÚ PRINCIPAL${NC}"
-  echo "  1) 🌐 Configurar dominio madre principal"
-  echo "  2) ➕ Agregar backend (nombre + IP + puerto)"
-  echo "  4) 📄 Listar backends (nombre + IP + puerto)"
-  echo "  6) 🗑️  Eliminar backend (elegir de lista)"
-  echo "  7) ✅ Healthcheck (HTTP y latencia)"
-  echo "  0) 🚪 Salir"
+  clear || true
+  echo "==============================================================="
+  echo "   🚀 ${APP_TITLE}"
+  echo "==============================================================="
+  echo
+  echo "[1] Instalar / Actualizar"
+  echo "[2] Desinstalar"
+  echo "[3] Salir"
   echo
 }
 
-main() {
-  need_root
-  read_cfg
-  ensure_files
-  rebuild_balancer_files >/dev/null 2>&1 || true
-  write_apply_conf >/dev/null 2>&1 || true
-
-  while true; do
-    banner
-    quick_status
-    menu
-    read -r -p "Opción: " opt
-    echo
-    case "$opt" in
-      1) set_primary_domain; pause ;;
-      2) add_backend; pause ;;
-      4) list_backends_general; pause ;;
-      6) delete_backend_pick; pause ;;
-      7) healthcheck_all; pause ;;
-      0) exit 0 ;;
-      *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
-    esac
-  done
-}
-
-main
+need_root
+while true; do
+  menu
+  read -r -p "Opción: " op
+  case "$op" in
+    1) install_or_update; exit 0 ;;
+    2) uninstall_now; exit 0 ;;
+    3) exit 0 ;;
+    *) echo "Opción inválida"; sleep 1 ;;
+  esac
+done
