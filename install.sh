@@ -225,4 +225,29 @@ uninstall_now() {
   rm -f /usr/local/bin/backendmgr
   rm -f /usr/local/bin/nginx
   rm -rf /etc/backendmgr
-  echo "✅ Listo. (No bo
+  echo "✅ Listo. (No borro /etc/nginx ni backups en /root/backendmgr-backups)"
+}
+
+menu() {
+  clear
+  echo "==============================================================="
+  echo "   🚀 ${APP_TITLE}"
+  echo "==============================================================="
+  echo
+  echo "[1] Instalar / Actualizar"
+  echo "[2] Desinstalar"
+  echo "[3] Salir"
+  echo
+}
+
+need_root
+while true; do
+  menu
+  read -r -p "Opción: " op
+  case "$op" in
+    1) install_or_update; exit 0 ;;
+    2) uninstall_now; exit 0 ;;
+    3) exit 0 ;;
+    *) echo "Opción inválida"; sleep 1 ;;
+  esac
+done
