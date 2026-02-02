@@ -34,11 +34,6 @@ backup_file() {
   [[ -f "$f" ]] && cp -a "$f" "${BACKUP_DIR}/$(basename "$f").bak-$(date +%Y%m%d-%H%M%S)" || true
 }
 
-nginx_reload_safe() {
-  # Evita cuelgues con systemctl
-  timeout 8s nginx -s reload >/dev/null 2>&1 || true
-}
-
 download_panel() {
   local tmp
   tmp="$(mktemp -d)"
@@ -103,26 +98,128 @@ EOF
 
   if [[ ! -f "$NGX_MAIN_INCLUDE" ]]; then
     cat > "$NGX_MAIN_INCLUDE" <<EOF
+# ==========================================================
 # Backend Manager Nenenet 3.0 - include principal (http{})
+# ==========================================================
 include ${NGX_LOGGING_SNIP};
 
+# Mapa para decidir backend basado en header HTTP personalizado
 map \$http_backend \$backend_url {
     default "http://127.0.0.1:8880";
     include ${NGX_BACKENDS_MAP};
 }
 
+# req/conn rate-limit
 limit_req_zone \$binary_remote_addr zone=backendmgr_req:10m rate=10r/s;
 limit_conn_zone \$binary_remote_addr zone=backendmgr_conn:10m;
 
+# Balanceador
 include ${NGX_BALANCER_CONF};
 
+# Speed limits (0 = unlimited)
 map \$remote_addr \$ip_limit_rate { default 0; include ${NGX_LIMITS_IP}; }
 map \$http_backend \$backend_limit_rate { default 0; include ${NGX_LIMITS_BACKEND}; }
 map \$backend_url \$url_limit_rate { default 0; include ${NGX_LIMITS_URL}; }
 
+# Server blocks generados por el panel
 include ${SERVERS_DIR}/*.conf;
 EOF
   fi
+}
+
+migrate_minimal_nginx_conf() {
+  local nginx_conf="/etc/nginx/nginx.conf"
+  [[ -f "$nginx_conf" ]] || return 0
+
+  grep -qF "include ${NGX_MAIN_INCLUDE};" "$nginx_conf" && return 0
+
+  if ! grep -qE 'map\s+\$http_backend\s+\$backend_url' "$nginx_conf"; then
+    return 0
+  fi
+
+  echo "🛠️  Detectado nginx.conf con mapa inline (modo minimal). Migrando a backendmgr..."
+  backup_file "$nginx_conf"
+
+  if [[ ! -s "$NGX_BACKENDS_MAP" ]]; then
+    awk '
+      BEGIN{inmap=0}
+      /map[ \t]+\\$http_backend[ \t]+\\$backend_url[ \t]*\\{/ {inmap=1; next}
+      inmap && /}/ {inmap=0; next}
+      inmap {
+        if($0 ~ /\"[^\"]+\"[ \t]+\"http:\/\//){
+          gsub(/^[ \t]+/,""); gsub(/[ \t]*$/,"");
+          if($0 !~ /;[ \t]*$/) $0=$0";"
+          print "    "$0
+        }
+      }
+    ' "$nginx_conf" > "${NGX_BACKENDS_MAP}.tmp" || true
+    mv "${NGX_BACKENDS_MAP}.tmp" "$NGX_BACKENDS_MAP"
+  fi
+
+  local dom cto sto rto
+  dom="$(grep -E '^[ \t]*server_name[ \t]+' "$nginx_conf" | head -n1 | sed -E 's/^[ \t]*server_name[ \t]+([^;]+);.*/\1/' || true)"
+  cto="$(grep -E '^[ \t]*proxy_connect_timeout[ \t]+' "$nginx_conf" | head -n1 | awk '{print $2}' | tr -d ';' || true)"
+  sto="$(grep -E '^[ \t]*proxy_send_timeout[ \t]+' "$nginx_conf" | head -n1 | awk '{print $2}' | tr -d ';' || true)"
+  rto="$(grep -E '^[ \t]*proxy_read_timeout[ \t]+' "$nginx_conf" | head -n1 | awk '{print $2}' | tr -d ';' || true)"
+  cto="${cto:-300s}"; sto="${sto:-600s}"; rto="${rto:-600s}"
+
+  if [[ -n "${dom:-}" ]]; then
+    local cur
+    cur="$(jq -r '.primary_domain' "$CFG_FILE")"
+    if [[ -z "${cur:-}" || "$cur" == "null" ]]; then
+      jq --arg v "$dom" '.primary_domain=$v' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
+    fi
+
+    local f="${SERVERS_DIR}/${dom}.conf"
+    if [[ ! -f "$f" ]]; then
+      local safe="${dom//./_}"
+      cat > "$f" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+
+    server_name ${dom};
+
+    access_log /var/log/nginx/${safe}.access.log;
+    error_log  /var/log/nginx/${safe}.error.log;
+
+    # Opcional: timeouts largos para backend
+    proxy_connect_timeout ${cto};
+    proxy_send_timeout    ${sto};
+    proxy_read_timeout    ${rto};
+
+    location / {
+        proxy_pass \$backend_url;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+
+        include /etc/nginx/conf.d/backendmgr/apply.conf;
+    }
+}
+EOF
+    fi
+  fi
+
+  cat > "$nginx_conf" <<EOF
+worker_processes auto;
+pid /run/nginx.pid;
+include /etc/nginx/modules-enabled/*.conf;
+
+events {
+    worker_connections 2048;
+}
+
+http {
+    # Backend Manager Nenenet 3.0 (incluye mapas/servers/limits)
+    include ${NGX_MAIN_INCLUDE};
+}
+EOF
 }
 
 connect_include_into_nginx_conf() {
@@ -180,7 +277,7 @@ install_or_update() {
   echo "[1/9] Dependencias..."
   export DEBIAN_FRONTEND=noninteractive
   apt update -y
-  apt install -y nginx curl jq gawk sed grep coreutils iproute2 net-tools nano ufw timeout
+  apt install -y nginx curl jq gawk sed grep coreutils iproute2 net-tools nano ufw
 
   echo "[2/9] Archivos base..."
   write_base_files
@@ -188,30 +285,33 @@ install_or_update() {
   echo "[3/9] Descargando panel..."
   download_panel
 
-  echo "[4/9] Include en nginx.conf..."
-  connect_include_into_nginx_conf
+  echo "[4/9] Adaptando nginx.conf (migración si es minimal)..."
+  migrate_minimal_nginx_conf
 
-  echo "[5/9] Wrapper nginx..."
+  echo "[5/9] Include en nginx.conf (si aplica)..."
+  connect_include_into_nginx_conf || true
+
+  echo "[6/9] Wrapper nginx..."
   install_wrapper
 
-  echo "[6/9] Validando Nginx..."
-  if ! timeout 10s nginx -t; then
-    echo "⚠️ nginx -t falló o tardó demasiado. Revisá con: nginx -T"
+  echo "[7/9] Validando Nginx..."
+  if ! timeout 12s nginx -t; then
+    echo "⚠️ nginx -t falló o tardó demasiado."
+    echo "   Revisá con: nginx -T | tail -n 120"
     exit 1
   fi
 
-  echo "[7/9] Reload Nginx..."
-  nginx_reload_safe
+  echo "[8/9] Reload Nginx..."
+  timeout 8s nginx -s reload >/dev/null 2>&1 || true
 
-  echo "[8/9] Listo. Abrir panel: sudo nginx"
+  echo "[9/9] Listo."
+  echo "Abrir panel: sudo nginx"
   echo
-  echo "[9/9] Abrir panel ahora..."
   read -r -p "¿Abrir panel ahora? (Y/n): " ans
   ans="${ans:-Y}"
   if [[ "$ans" =~ ^[Yy]$ ]]; then
     exec /usr/local/bin/backendmgr
   fi
-  echo "Fin."
 }
 
 uninstall_now() {
