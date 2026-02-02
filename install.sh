@@ -4,14 +4,17 @@ set -euo pipefail
 APP_TITLE="Backend Manager Nenenet 3.0"
 REPO_RAW_BASE="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/main"
 
-ETC_DIR="/etc/backendmgr"
+# Optional sandbox root for testing (keeps host clean)
+ROOT="${BACKENDMGR_ROOT:-}"
+
+ETC_DIR="${ROOT}/etc/backendmgr"
 CFG_FILE="${ETC_DIR}/config.json"
 REAL_NGINX_PATH_FILE="${ETC_DIR}/real_nginx_path"
 
-PANEL_BIN_DST="/usr/local/bin/backendmgr"
-WRAPPER_BIN="/usr/local/bin/nginx"
+PANEL_BIN_DST="${ROOT}/usr/local/bin/backendmgr"
+WRAPPER_BIN="${ROOT}/usr/local/bin/nginx"
 
-NGX_DIR="/etc/nginx/conf.d/backendmgr"
+NGX_DIR="${ROOT}/etc/nginx/conf.d/backendmgr"
 SERVERS_DIR="${NGX_DIR}/servers"
 
 NGX_MAIN_INCLUDE="${NGX_DIR}/backendmgr.conf"
@@ -24,7 +27,7 @@ NGX_LIMITS_IP="${NGX_DIR}/limits_ip.map"
 NGX_LIMITS_BACKEND="${NGX_DIR}/limits_backend.map"
 NGX_LIMITS_URL="${NGX_DIR}/limits_url.map"
 
-BACKUP_DIR="/root/backendmgr-backups"
+BACKUP_DIR="${ROOT}/root/backendmgr-backups"
 
 need_root() { [[ ${EUID:-999} -eq 0 ]] || { echo "ERROR: ejecutá como root (sudo)."; exit 1; }; }
 
@@ -34,7 +37,26 @@ backup_file() {
   [[ -f "$f" ]] && cp -a "$f" "${BACKUP_DIR}/$(basename "$f").bak-$(date +%Y%m%d-%H%M%S)" || true
 }
 
+nginx_reload_safe() {
+  # In some containers systemctl may fail; fall back to nginx -s reload
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl reload nginx >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1 || true
+  else
+    nginx -s reload >/dev/null 2>&1 || true
+  fi
+}
+
 download_panel() {
+  if [[ "${BACKENDMGR_SKIP_DOWNLOAD:-0}" == "1" ]]; then
+    # For testing: if ./backendmgr exists, install it
+    if [[ -f "./backendmgr" ]]; then
+      install -m 0755 "./backendmgr" "${PANEL_BIN_DST}"
+      return 0
+    fi
+    echo "ERROR: BACKENDMGR_SKIP_DOWNLOAD=1 pero no existe ./backendmgr junto a install.sh"
+    exit 1
+  fi
+
   local tmp
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp" >/dev/null 2>&1 || true' RETURN
@@ -44,13 +66,14 @@ download_panel() {
 }
 
 write_base_files() {
-  mkdir -p "$ETC_DIR" "$NGX_DIR" "$SERVERS_DIR" "$BACKUP_DIR" /var/lib/backendmgr
+  mkdir -p "$ETC_DIR" "$NGX_DIR" "$SERVERS_DIR" "$BACKUP_DIR" "${ROOT}/var/lib/backendmgr"
+  mkdir -p "$(dirname "$PANEL_BIN_DST")" "$(dirname "$WRAPPER_BIN")"
   chmod 700 "$BACKUP_DIR" || true
 
   if [[ ! -f "$CFG_FILE" ]]; then
-    cat > "$CFG_FILE" <<'JSON'
+    cat > "$CFG_FILE" <<JSON
 {
-  "nginx_conf": "/etc/nginx/nginx.conf",
+  "nginx_conf": "${ROOT}/etc/nginx/nginx.conf",
   "header_name": "Backend",
   "primary_domain": "",
 
@@ -64,7 +87,7 @@ write_base_files() {
 
   "curl_timeout_seconds": 8,
   "traffic_window_seconds": 60,
-  "stats_log_path": "/var/log/nginx/backendmgr.stats.log"
+  "stats_log_path": "${ROOT}/var/log/nginx/backendmgr.stats.log"
 }
 JSON
   fi
@@ -183,15 +206,20 @@ EOF
 
 install_or_update() {
   need_root
-  echo "[1/9] Dependencias..."
-  export DEBIAN_FRONTEND=noninteractive
-  apt update -y
-  apt install -y nginx curl jq gawk sed grep coreutils iproute2 net-tools nano ufw
+
+  if [[ "${BACKENDMGR_SKIP_APT:-0}" != "1" ]]; then
+    echo "[1/9] Dependencias..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt update -y
+    apt install -y nginx curl jq gawk sed grep coreutils iproute2 net-tools nano ufw
+  else
+    echo "[1/9] Dependencias... (saltado por BACKENDMGR_SKIP_APT=1)"
+  fi
 
   echo "[2/9] Archivos base..."
   write_base_files
 
-  echo "[3/9] Descargando panel..."
+  echo "[3/9] Instalando panel..."
   download_panel
 
   echo "[4/9] Include en nginx.conf..."
@@ -200,36 +228,34 @@ install_or_update() {
   echo "[5/9] Wrapper nginx..."
   install_wrapper
 
-  echo "[6/9] Validando Nginx..."
+  echo "[6/9] Validando nginx -t..."
   nginx -t
-  systemctl enable nginx >/dev/null 2>&1 || true
-  systemctl reload nginx
 
-  echo "[7/9] Listo."
-  echo "Abrir panel: sudo nginx"
-  echo "TIP: Dentro de tu location / incluí:"
-  echo "  include /etc/nginx/conf.d/backendmgr/apply.conf;"
+  echo "[7/9] Reload nginx..."
+  nginx_reload_safe
+
+  echo "[8/9] Listo. Abrir panel: sudo nginx"
   echo
 
-  echo "[8/9] Abrir panel ahora..."
+  echo "[9/9] Abrir panel ahora..."
   read -r -p "¿Abrir panel ahora? (Y/n): " ans
   ans="${ans:-Y}"
   if [[ "$ans" =~ ^[Yy]$ ]]; then
-    exec /usr/local/bin/backendmgr
+    exec "${PANEL_BIN_DST}"
   fi
-  echo "[9/9] Fin."
+  echo "Fin."
 }
 
 uninstall_now() {
   need_root
-  rm -f /usr/local/bin/backendmgr
-  rm -f /usr/local/bin/nginx
-  rm -rf /etc/backendmgr
-  echo "✅ Listo. (No borro /etc/nginx ni backups en /root/backendmgr-backups)"
+  rm -f "${PANEL_BIN_DST}"
+  rm -f "${WRAPPER_BIN}"
+  rm -rf "${ETC_DIR}"
+  echo "✅ Listo. (No borro /etc/nginx ni backups en ${BACKUP_DIR})"
 }
 
 menu() {
-  clear
+  clear || true
   echo "==============================================================="
   echo "   🚀 ${APP_TITLE}"
   echo "==============================================================="
