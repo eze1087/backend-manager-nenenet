@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_TITLE="Backend Manager Nenenet 3.0"
+APP_NAME="Backend Manager Nenenet 3.0"
+
 REPO_RAW_BASE="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main"
 
 ETC_DIR="/etc/backendmgr"
 CFG_FILE="${ETC_DIR}/config.json"
-REAL_NGINX_PATH_FILE="${ETC_DIR}/real_nginx_path"
 
 PANEL_BIN_DST="/usr/local/bin/backendmgr"
 
@@ -57,15 +57,15 @@ download_panel() {
   done
 
   if [[ "$ok" -ne 1 ]]; then
-    echo "ERROR: no pude descargar backendmgr (404)."
-    echo "Subí el archivo como backendmgr (o backendmgr.txt) en main."
+    echo "ERROR: no pude descargar backendmgr desde tu repo (404)."
+    echo "Subí el panel como backendmgr (o backendmgr.txt) en main."
     exit 1
   fi
 
-  # Normaliza CRLF -> LF (importantísimo)
+  # Normaliza CRLF (Windows)
   sed -i 's/\r$//' "${tmp}/backendmgr" || true
 
-  # Si vino como .txt sin shebang
+  # Si vino como txt sin shebang
   if ! head -n1 "${tmp}/backendmgr" | grep -qE '^#!/'; then
     sed -i '1i#!/usr/bin/env bash' "${tmp}/backendmgr"
   fi
@@ -110,11 +110,13 @@ JSON
 log_format backendmgr_stats '$time_local|$remote_addr|$host|$http_backend|$upstream_addr|$status|$body_bytes_sent|$request_time|$upstream_response_time|$request';
 EOF
 
+  # apply.conf base (el panel lo re-escribe)
   cat > "$NGX_APPLY_SNIP" <<'EOF'
 # Backend Manager Nenenet 3.0 apply.conf
 access_log /var/log/nginx/backendmgr.stats.log backendmgr_stats;
 EOF
 
+  # balancer.conf base (OFF)
   cat > "$NGX_BALANCER_CONF" <<'EOF'
 # backendmgr balancer.conf (balance OFF)
 map $host $backendmgr_balance { default 0; }
@@ -144,10 +146,32 @@ include ${SERVERS_DIR}/*.conf;
 EOF
 }
 
-apply_exact_nginx_conf_template() {
+# NO tocar tu nginx.conf si ya tiene tu estructura que conecta
+ensure_nginx_conf() {
   local nginx_conf="/etc/nginx/nginx.conf"
   backup_file "$nginx_conf"
 
+  # Si ya existe y contiene el map de backend_url, no lo tocamos.
+  if [[ -f "$nginx_conf" ]] && grep -q 'map\s\+\$http_backend\s\+\$backend_url' "$nginx_conf"; then
+    # Solo aseguramos que incluya nuestros archivos si faltan.
+    if ! grep -q '/etc/nginx/conf.d/backendmgr/backendmgr.conf' "$nginx_conf"; then
+      # intentamos insertar include dentro de http { } sin romper nada
+      if grep -q 'http\s*{' "$nginx_conf"; then
+        awk '
+          BEGIN{ins=0}
+          {print}
+          /http[ \t]*\{/ && ins==0{
+            print "    # Backend Manager Nenenet 3.0"
+            print "    include /etc/nginx/conf.d/backendmgr/backendmgr.conf;"
+            ins=1
+          }
+        ' "$nginx_conf" > "${nginx_conf}.tmp" && mv "${nginx_conf}.tmp" "$nginx_conf"
+      fi
+    fi
+    return 0
+  fi
+
+  # Si no existe o no está en tu formato, generamos uno compatible (sin server fijo, lo manejan los .conf)
   cat > "$nginx_conf" <<EOF
 worker_processes auto;
 pid /run/nginx.pid;
@@ -158,6 +182,7 @@ events {
 }
 
 http {
+    # Mapa para decidir backend basado en header HTTP personalizado
     map \$http_backend \$backend_url {
         default "http://127.0.0.1:8880";
         include ${NGX_BACKENDS_MAP};
@@ -168,9 +193,9 @@ http {
 EOF
 }
 
-# ✅ Wrapper con TTY forzado (para que nginx SIEMPRE abra menú)
-install_wrapper_strict() {
-  mkdir -p "$BACKUP_DIR" "$ETC_DIR"
+# Wrapper definitivo: nginx abre menú (y nginx real sigue funcionando con args)
+install_wrapper() {
+  mkdir -p "$BACKUP_DIR"
 
   local SBIN="/usr/sbin/nginx"
   local SBIN_REAL="/usr/sbin/nginx.real"
@@ -180,8 +205,6 @@ install_wrapper_strict() {
     mv "$SBIN" "$SBIN_REAL"
   fi
 
-  echo "$SBIN_REAL" > "$REAL_NGINX_PATH_FILE" || true
-
   cat > "$SBIN" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -189,20 +212,17 @@ set -euo pipefail
 PANEL="/usr/local/bin/backendmgr"
 REAL="/usr/sbin/nginx.real"
 
+# Sin args => panel
 if [[ $# -eq 0 ]]; then
-  if [[ ! -x "$PANEL" ]]; then
-    echo "ERROR: no existe o no es ejecutable: $PANEL" >&2
-    exit 1
-  fi
-  exec </dev/tty >/dev/tty 2>&1 "$PANEL"
+  exec "$PANEL"
 fi
 
+# Atajos => panel
 case "${1:-}" in
-  menu|panel|nenenet)
-    exec </dev/tty >/dev/tty 2>&1 "$PANEL"
-    ;;
+  menu|panel|nenenet) exec "$PANEL" ;;
 esac
 
+# Passthrough a nginx real
 if [[ ! -x "$REAL" ]]; then
   REAL="/usr/sbin/nginx"
 fi
@@ -211,34 +231,14 @@ EOF
 
   chmod +x "$SBIN"
 
-  # nginx sin sudo también => wrapper
+  # Asegurar que nginx (sin sudo) también vaya al wrapper
   if [[ -e /usr/bin/nginx ]]; then
-    backup_file /usr/bin/nginx
+    cp -a /usr/bin/nginx "${BACKUP_DIR}/nginx.bin.bak-$(date +%Y%m%d-%H%M%S)" || true
     rm -f /usr/bin/nginx
     ln -s /usr/sbin/nginx /usr/bin/nginx
   fi
 
   ln -sf /usr/sbin/nginx /usr/local/bin/nginx || true
-
-  grep -q "/usr/local/bin/backendmgr" /usr/sbin/nginx || {
-    echo "ERROR: wrapper no quedó bien instalado."
-    head -n 25 /usr/sbin/nginx || true
-    exit 1
-  }
-}
-
-post_install_check() {
-  echo
-  echo "== CHECK =="
-  echo "command -v nginx: $(command -v nginx || true)"
-  echo "readlink -f nginx: $(readlink -f "$(command -v nginx)" 2>/dev/null || true)"
-  echo "ls -l /usr/sbin/nginx /usr/sbin/nginx.real:"
-  ls -l /usr/sbin/nginx /usr/sbin/nginx.real 2>/dev/null || true
-  echo
-  echo "head -n 12 /usr/sbin/nginx:"
-  head -n 12 /usr/sbin/nginx || true
-  echo "=========="
-  echo
 }
 
 install_or_update() {
@@ -255,11 +255,11 @@ install_or_update() {
   echo "[3/9] Descargando panel..."
   download_panel
 
-  echo "[4/9] Aplicando nginx.conf (plantilla exacta)..."
-  apply_exact_nginx_conf_template
+  echo "[4/9] nginx.conf (sin romper tu config)..."
+  ensure_nginx_conf
 
   echo "[5/9] Wrapper nginx (nginx abre menú)..."
-  install_wrapper_strict
+  install_wrapper
 
   echo "[6/9] Validando Nginx..."
   nginx -t
@@ -269,19 +269,18 @@ install_or_update() {
 
   echo "[8/9] Listo."
   echo "Abrir panel: nginx   (o sudo nginx)"
-  post_install_check
 
   read -r -p "[9/9] ¿Abrir panel ahora? (Y/n): " ans
   ans="${ans:-Y}"
   if [[ "$ans" =~ ^[Yy]$ ]]; then
-    exec </dev/tty >/dev/tty 2>&1 /usr/local/bin/backendmgr
+    exec /usr/local/bin/backendmgr
   fi
 }
 
 menu() {
   clear || true
   echo "==============================================================="
-  echo "   🚀 ${APP_TITLE}"
+  echo "   🚀 ${APP_NAME}"
   echo "==============================================================="
   echo
   echo "[1] Instalar / Actualizar"
