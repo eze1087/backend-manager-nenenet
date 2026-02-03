@@ -2,8 +2,6 @@
 set -euo pipefail
 
 APP_TITLE="Backend Manager Nenenet 3.0"
-
-# Tu repo RAW (main)
 REPO_RAW_BASE="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main"
 
 ETC_DIR="/etc/backendmgr"
@@ -27,7 +25,6 @@ NGX_LIMITS_IP="${NGX_DIR}/limits_ip.map"
 NGX_LIMITS_BACKEND="${NGX_DIR}/limits_backend.map"
 NGX_LIMITS_URL="${NGX_DIR}/limits_url.map"
 
-# backups/restores en /etc/nginx
 BACKUP_DIR="/etc/nginx/backendmgr-backups"
 
 need_root() { [[ ${EUID:-999} -eq 0 ]] || { echo "ERROR: ejecutá con sudo."; exit 1; }; }
@@ -60,15 +57,15 @@ download_panel() {
   done
 
   if [[ "$ok" -ne 1 ]]; then
-    echo "ERROR: no pude descargar backendmgr desde el repo (404)."
-    echo "Asegurate de subir el archivo como: backendmgr (o backendmgr.txt) en la rama main."
+    echo "ERROR: no pude descargar backendmgr (404)."
+    echo "Subí el archivo como backendmgr (o backendmgr.txt) en main."
     exit 1
   fi
 
-  # arreglar CRLF si el archivo quedó con \r (Windows)
+  # Normaliza CRLF -> LF (importantísimo)
   sed -i 's/\r$//' "${tmp}/backendmgr" || true
 
-  # asegurar shebang si era .txt
+  # Si vino como .txt sin shebang
   if ! head -n1 "${tmp}/backendmgr" | grep -qE '^#!/'; then
     sed -i '1i#!/usr/bin/env bash' "${tmp}/backendmgr"
   fi
@@ -88,16 +85,13 @@ write_base_files() {
   "nginx_conf": "/etc/nginx/nginx.conf",
   "header_name": "Backend",
   "primary_domain": "",
-
   "rate_limit_enabled": true,
   "rate_limit_rate": "10r/s",
   "rate_limit_burst": 20,
   "conn_limit": 30,
-
   "curl_timeout_seconds": 8,
   "traffic_window_seconds": 60,
   "stats_log_path": "/var/log/nginx/backendmgr.stats.log",
-
   "balance_mode": "off",
   "balance_max_slots_cap": 64
 }
@@ -106,10 +100,8 @@ JSON
 
   [[ -f "$NGX_BACKENDS_MAP" ]] || : > "$NGX_BACKENDS_MAP"
   [[ -f "$NGX_APPLY_SNIP" ]] || : > "$NGX_APPLY_SNIP"
-
   [[ -f "$NGX_BALANCER_CONF" ]] || : > "$NGX_BALANCER_CONF"
   [[ -f "$NGX_BALANCED_MAP" ]] || : > "$NGX_BALANCED_MAP"
-
   [[ -f "$NGX_LIMITS_IP" ]] || : > "$NGX_LIMITS_IP"
   [[ -f "$NGX_LIMITS_BACKEND" ]] || : > "$NGX_LIMITS_BACKEND"
   [[ -f "$NGX_LIMITS_URL" ]] || : > "$NGX_LIMITS_URL"
@@ -118,14 +110,11 @@ JSON
 log_format backendmgr_stats '$time_local|$remote_addr|$host|$http_backend|$upstream_addr|$status|$body_bytes_sent|$request_time|$upstream_response_time|$request';
 EOF
 
-  # apply.conf base (el panel lo actualiza)
   cat > "$NGX_APPLY_SNIP" <<'EOF'
 # Backend Manager Nenenet 3.0 apply.conf
-# (El panel lo mantiene actualizado)
 access_log /var/log/nginx/backendmgr.stats.log backendmgr_stats;
 EOF
 
-  # balancer.conf base (OFF)
   cat > "$NGX_BALANCER_CONF" <<'EOF'
 # backendmgr balancer.conf (balance OFF)
 map $host $backendmgr_balance { default 0; }
@@ -140,21 +129,17 @@ EOF
 
 write_backendmgr_http_include() {
   cat > "$NGX_MAIN_INCLUDE" <<EOF
-# Backend Manager Nenenet 3.0 - include http{}
 include ${NGX_LOGGING_SNIP};
 
-# req/conn zones (panel ajusta apply.conf)
 limit_req_zone \$binary_remote_addr zone=backendmgr_req:10m rate=10r/s;
 limit_conn_zone \$binary_remote_addr zone=backendmgr_conn:10m;
 
 include ${NGX_BALANCER_CONF};
 
-# speed limits maps (0=unlimited)
 map \$remote_addr \$ip_limit_rate { default 0; include ${NGX_LIMITS_IP}; }
 map \$http_backend \$backend_limit_rate { default 0; include ${NGX_LIMITS_BACKEND}; }
 map \$backend_url \$url_limit_rate { default 0; include ${NGX_LIMITS_URL}; }
 
-# dominios madre
 include ${SERVERS_DIR}/*.conf;
 EOF
 }
@@ -173,26 +158,23 @@ events {
 }
 
 http {
-    # Mapa para decidir backend basado en header HTTP personalizado
     map \$http_backend \$backend_url {
         default "http://127.0.0.1:8880";
         include ${NGX_BACKENDS_MAP};
     }
 
-    # Backend Manager (rate-limit, logs, speed-limit, servers, balance)
     include ${NGX_MAIN_INCLUDE};
 }
 EOF
 }
 
-# ✅ FIX DEFINITIVO: nginx y sudo nginx abren menú
+# ✅ Wrapper con TTY forzado (para que nginx SIEMPRE abra menú)
 install_wrapper_strict() {
   mkdir -p "$BACKUP_DIR" "$ETC_DIR"
 
   local SBIN="/usr/sbin/nginx"
   local SBIN_REAL="/usr/sbin/nginx.real"
 
-  # mover nginx real a nginx.real si aún no existe
   if [[ -x "$SBIN" && ! -e "$SBIN_REAL" ]]; then
     cp -a "$SBIN" "${BACKUP_DIR}/nginx.sbin.bak-$(date +%Y%m%d-%H%M%S)" || true
     mv "$SBIN" "$SBIN_REAL"
@@ -204,42 +186,45 @@ install_wrapper_strict() {
 #!/usr/bin/env bash
 set -euo pipefail
 
-# sin args => menú
+PANEL="/usr/local/bin/backendmgr"
+REAL="/usr/sbin/nginx.real"
+
 if [[ $# -eq 0 ]]; then
-  exec /usr/local/bin/backendmgr
+  if [[ ! -x "$PANEL" ]]; then
+    echo "ERROR: no existe o no es ejecutable: $PANEL" >&2
+    exit 1
+  fi
+  exec </dev/tty >/dev/tty 2>&1 "$PANEL"
 fi
 
-# atajos => menú
 case "${1:-}" in
-  menu|panel|nenenet) exec /usr/local/bin/backendmgr ;;
+  menu|panel|nenenet)
+    exec </dev/tty >/dev/tty 2>&1 "$PANEL"
+    ;;
 esac
 
-# passthrough a nginx real
-REAL="/usr/sbin/nginx.real"
 if [[ ! -x "$REAL" ]]; then
   REAL="/usr/sbin/nginx"
 fi
 exec "$REAL" "$@"
 EOF
+
   chmod +x "$SBIN"
 
-  # Para que "nginx" sin sudo también vaya al wrapper:
-  # si existe /usr/bin/nginx, lo apuntamos al wrapper
+  # nginx sin sudo también => wrapper
   if [[ -e /usr/bin/nginx ]]; then
     backup_file /usr/bin/nginx
     rm -f /usr/bin/nginx
     ln -s /usr/sbin/nginx /usr/bin/nginx
   fi
 
-  # compat extra
   ln -sf /usr/sbin/nginx /usr/local/bin/nginx || true
 
-  # verificación fuerte
-  if ! grep -q "/usr/local/bin/backendmgr" /usr/sbin/nginx; then
-    echo "ERROR: wrapper no quedó bien instalado en /usr/sbin/nginx"
+  grep -q "/usr/local/bin/backendmgr" /usr/sbin/nginx || {
+    echo "ERROR: wrapper no quedó bien instalado."
     head -n 25 /usr/sbin/nginx || true
     exit 1
-  fi
+  }
 }
 
 post_install_check() {
@@ -250,8 +235,8 @@ post_install_check() {
   echo "ls -l /usr/sbin/nginx /usr/sbin/nginx.real:"
   ls -l /usr/sbin/nginx /usr/sbin/nginx.real 2>/dev/null || true
   echo
-  echo "head -n 8 /usr/sbin/nginx:"
-  head -n 8 /usr/sbin/nginx || true
+  echo "head -n 12 /usr/sbin/nginx:"
+  head -n 12 /usr/sbin/nginx || true
   echo "=========="
   echo
 }
@@ -289,33 +274,8 @@ install_or_update() {
   read -r -p "[9/9] ¿Abrir panel ahora? (Y/n): " ans
   ans="${ans:-Y}"
   if [[ "$ans" =~ ^[Yy]$ ]]; then
-    exec /usr/local/bin/backendmgr
+    exec </dev/tty >/dev/tty 2>&1 /usr/local/bin/backendmgr
   fi
-}
-
-uninstall_now() {
-  need_root
-  echo "== Uninstall ${APP_TITLE} =="
-
-  # Restaurar nginx real si existe
-  if [[ -x /usr/sbin/nginx.real ]]; then
-    rm -f /usr/sbin/nginx
-    mv /usr/sbin/nginx.real /usr/sbin/nginx
-  fi
-
-  # Restaurar /usr/bin/nginx como symlink a /usr/sbin/nginx
-  if [[ -L /usr/bin/nginx ]]; then
-    rm -f /usr/bin/nginx
-    ln -s /usr/sbin/nginx /usr/bin/nginx 2>/dev/null || true
-  fi
-
-  rm -f /usr/local/bin/backendmgr
-  rm -f /usr/local/bin/nginx
-
-  rm -rf /etc/backendmgr
-  rm -rf /etc/nginx/conf.d/backendmgr
-
-  echo "✅ Eliminado. Backups quedan en: ${BACKUP_DIR}"
 }
 
 menu() {
@@ -325,8 +285,7 @@ menu() {
   echo "==============================================================="
   echo
   echo "[1] Instalar / Actualizar"
-  echo "[2] Desinstalar"
-  echo "[3] Salir"
+  echo "[2] Salir"
   echo
 }
 
@@ -336,8 +295,7 @@ while true; do
   read -r -p "Opción: " op
   case "$op" in
     1) install_or_update; exit 0 ;;
-    2) uninstall_now; exit 0 ;;
-    3) exit 0 ;;
+    2) exit 0 ;;
     *) echo "Opción inválida"; sleep 1 ;;
   esac
 done
