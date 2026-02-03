@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# fuerza TTY si existe (evita que read falle y el panel se cierre)
+if [[ -r /dev/tty ]]; then
+  exec </dev/tty >/dev/tty 2>&1
+fi
+
 APP_NAME="Backend Manager Nenenet 3.0"
 APP_VER="4.4"
 
@@ -500,7 +505,7 @@ validate_connection_test() {
   echo
 }
 
-# ------------------ FIREWALL UFW (opción 13) ------------------
+# ------------------ FIREWALL UFW ------------------
 ufw_open_port() {
   echo -e "${CYA}Firewall UFW: permitir tráfico por puerto${NC}"
   echo -e "${DIM}Ejemplo: 80/tcp (HTTP) o 443/tcp (HTTPS).${NC}\n"
