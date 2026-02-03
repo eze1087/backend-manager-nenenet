@@ -9,7 +9,6 @@ CFG_FILE="${ETC_DIR}/config.json"
 REAL_NGINX_PATH_FILE="${ETC_DIR}/real_nginx_path"
 
 PANEL_BIN_DST="/usr/local/bin/backendmgr"
-WRAPPER_BIN="/usr/local/bin/nginx"
 
 NGX_DIR="/etc/nginx/conf.d/backendmgr"
 SERVERS_DIR="${NGX_DIR}/servers"
@@ -24,7 +23,7 @@ NGX_LIMITS_IP="${NGX_DIR}/limits_ip.map"
 NGX_LIMITS_BACKEND="${NGX_DIR}/limits_backend.map"
 NGX_LIMITS_URL="${NGX_DIR}/limits_url.map"
 
-# ✅ Backup/restore en /etc/nginx (misma ubicación)
+# ✅ Backups en /etc/nginx
 BACKUP_DIR="/etc/nginx/backendmgr-backups"
 
 need_root() { [[ ${EUID:-999} -eq 0 ]] || { echo "ERROR: ejecutá como root (sudo)."; exit 1; }; }
@@ -39,6 +38,7 @@ download_panel() {
   local tmp
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp" >/dev/null 2>&1 || true' RETURN
+
   curl -fsSL "${REPO_RAW_BASE}/backendmgr" -o "${tmp}/backendmgr"
   chmod +x "${tmp}/backendmgr"
   install -m 0755 "${tmp}/backendmgr" "${PANEL_BIN_DST}"
@@ -80,17 +80,14 @@ JSON
 log_format backendmgr_stats '$time_local|$remote_addr|$host|$http_backend|$upstream_addr|$status|$body_bytes_sent|$request_time|$upstream_response_time|$request';
 EOF
 
+  # apply.conf lo completa el panel (backendmgr), acá dejamos base segura
   cat > "$NGX_APPLY_SNIP" <<'EOF'
 # Backend Manager Nenenet 3.0 apply.conf
-# Debe ir dentro de location / del dominio madre:
-# include /etc/nginx/conf.d/backendmgr/apply.conf;
-
+# (El panel lo mantiene actualizado)
 access_log /var/log/nginx/backendmgr.stats.log backendmgr_stats;
-
-# Rate limit (si está activo en config, el panel lo habilita aquí)
-# Speed limit (limit_rate) lo aplica el panel via maps
 EOF
 
+  # balancer.conf base (OFF)
   cat > "$NGX_BALANCER_CONF" <<'EOF'
 # backendmgr balancer.conf (balance OFF)
 map $host $backendmgr_balance { default 0; }
@@ -103,8 +100,7 @@ map $backendmgr_slot $balanced_backend_url {
 EOF
 }
 
-# ✅ Este archivo existe solo para “enganchar” el panel a tu nginx.conf
-#    pero tu nginx.conf queda con tu estructura exacta.
+# ✅ include que va dentro de http{} (no rompe tu estructura)
 write_backendmgr_http_include() {
   cat > "$NGX_MAIN_INCLUDE" <<EOF
 # ==========================================================
@@ -112,7 +108,7 @@ write_backendmgr_http_include() {
 # ==========================================================
 include ${NGX_LOGGING_SNIP};
 
-# req/conn rate-limit
+# req/conn rate-limit zones (valores por defecto; el panel ajusta apply.conf)
 limit_req_zone \$binary_remote_addr zone=backendmgr_req:10m rate=10r/s;
 limit_conn_zone \$binary_remote_addr zone=backendmgr_conn:10m;
 
@@ -123,12 +119,12 @@ map \$remote_addr \$ip_limit_rate { default 0; include ${NGX_LIMITS_IP}; }
 map \$http_backend \$backend_limit_rate { default 0; include ${NGX_LIMITS_BACKEND}; }
 map \$backend_url \$url_limit_rate { default 0; include ${NGX_LIMITS_URL}; }
 
-# servers del panel
+# servers (dominios madre)
 include ${SERVERS_DIR}/*.conf;
 EOF
 }
 
-# ✅ Genera /etc/nginx/nginx.conf con tu formato, y engancha includes correctos
+# ✅ nginx.conf con tu estructura exacta + include backends.map y backendmgr.conf
 apply_exact_nginx_conf_template() {
   local nginx_conf="/etc/nginx/nginx.conf"
   backup_file "$nginx_conf"
@@ -155,20 +151,26 @@ http {
 EOF
 }
 
+# ✅ FIX DEFINITIVO: wrapper en /usr/sbin/nginx para que "sudo nginx" lo ejecute SIEMPRE
 install_wrapper() {
-  local real
-  real="$(command -v nginx || true)"
-  [[ -n "${real:-}" ]] || real="/usr/sbin/nginx"
-  echo "$real" > "$REAL_NGINX_PATH_FILE"
+  local REAL="/usr/sbin/nginx"
+  local REAL_REAL="/usr/sbin/nginx.real"
+  local WRAP="/usr/sbin/nginx"
 
-  backup_file "$WRAPPER_BIN"
-  cat > "$WRAPPER_BIN" <<'EOF'
+  mkdir -p "$ETC_DIR" "$BACKUP_DIR"
+
+  # Si nginx.real no existe y nginx existe, lo movemos
+  if [[ -x "$REAL" && ! -e "$REAL_REAL" ]]; then
+    cp -a "$REAL" "${BACKUP_DIR}/nginx.real.bak-$(date +%Y%m%d-%H%M%S)" || true
+    mv "$REAL" "$REAL_REAL"
+  fi
+
+  # Guardar ruta real
+  echo "$REAL_REAL" > "$REAL_NGINX_PATH_FILE" || true
+
+  cat > "$WRAP" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-
-CFG_REAL="/etc/backendmgr/real_nginx_path"
-REAL="/usr/sbin/nginx"
-[[ -f "$CFG_REAL" ]] && REAL="$(cat "$CFG_REAL" 2>/dev/null || echo /usr/sbin/nginx)"
 
 # sin args => abre panel
 if [[ $# -eq 0 ]]; then
@@ -181,9 +183,17 @@ case "${1:-}" in
 esac
 
 # passthrough a nginx real
+REAL="/usr/sbin/nginx.real"
+if [[ ! -x "$REAL" ]]; then
+  REAL="/usr/sbin/nginx"
+fi
 exec "$REAL" "$@"
 EOF
-  chmod +x "$WRAPPER_BIN"
+
+  chmod +x "$WRAP"
+
+  # compat: si alguien llama /usr/local/bin/nginx, que funcione igual
+  ln -sf "$WRAP" /usr/local/bin/nginx || true
 }
 
 install_or_update() {
@@ -200,16 +210,16 @@ install_or_update() {
   echo "[3/9] Descargando panel..."
   download_panel
 
-  echo "[4/9] Aplicando nginx.conf EXACTO (como tu plantilla)..."
+  echo "[4/9] Aplicando nginx.conf (plantilla exacta)..."
   apply_exact_nginx_conf_template
 
-  echo "[5/9] Wrapper nginx..."
+  echo "[5/9] Wrapper nginx (sudo nginx abre menú)..."
   install_wrapper
 
   echo "[6/9] Validando Nginx..."
   if ! timeout 12s nginx -t; then
     echo "⚠️ nginx -t falló."
-    echo "   Revisá con: nginx -T | tail -n 120"
+    echo "   Revisá con: nginx -T | tail -n 140"
     exit 1
   fi
 
@@ -219,19 +229,30 @@ install_or_update() {
   echo "[8/9] Listo."
   echo "Abrir panel: sudo nginx"
   echo
+
   read -r -p "[9/9] ¿Abrir panel ahora? (Y/n): " ans
   ans="${ans:-Y}"
   if [[ "$ans" =~ ^[Yy]$ ]]; then
+    # Abrimos directo para no depender de PATH
     exec /usr/local/bin/backendmgr
   fi
 }
 
 uninstall_now() {
   need_root
+
+  # Restaurar nginx real si existe
+  if [[ -x /usr/sbin/nginx.real ]]; then
+    rm -f /usr/sbin/nginx
+    mv /usr/sbin/nginx.real /usr/sbin/nginx
+  fi
+
   rm -f /usr/local/bin/backendmgr
   rm -f /usr/local/bin/nginx
+
   rm -rf /etc/backendmgr
   rm -rf /etc/nginx/conf.d/backendmgr
+
   echo "✅ Listo. Backups quedan en: /etc/nginx/backendmgr-backups"
 }
 
