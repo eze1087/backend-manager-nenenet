@@ -16,15 +16,16 @@ SERVERS_DIR="${NGX_DIR}/servers"
 
 NGX_MAIN_INCLUDE="${NGX_DIR}/backendmgr.conf"
 NGX_BACKENDS_MAP="${NGX_DIR}/backends.map"
-NGX_LOGGING_SNIP="${NGX_DIR}/logging.conf"
 NGX_APPLY_SNIP="${NGX_DIR}/apply.conf"
+NGX_LOGGING_SNIP="${NGX_DIR}/logging.conf"
 NGX_BALANCER_CONF="${NGX_DIR}/balancer.conf"
 NGX_BALANCED_MAP="${NGX_DIR}/balanced.map"
 NGX_LIMITS_IP="${NGX_DIR}/limits_ip.map"
 NGX_LIMITS_BACKEND="${NGX_DIR}/limits_backend.map"
 NGX_LIMITS_URL="${NGX_DIR}/limits_url.map"
 
-BACKUP_DIR="/root/backendmgr-backups"
+# ✅ Backup/restore en /etc/nginx (misma ubicación)
+BACKUP_DIR="/etc/nginx/backendmgr-backups"
 
 need_root() { [[ ${EUID:-999} -eq 0 ]] || { echo "ERROR: ejecutá como root (sudo)."; exit 1; }; }
 
@@ -54,9 +55,6 @@ write_base_files() {
   "header_name": "Backend",
   "primary_domain": "",
 
-  "balance_mode": "off",
-  "balance_max_slots_cap": 64,
-
   "rate_limit_enabled": true,
   "rate_limit_rate": "10r/s",
   "rate_limit_burst": 20,
@@ -64,7 +62,10 @@ write_base_files() {
 
   "curl_timeout_seconds": 8,
   "traffic_window_seconds": 60,
-  "stats_log_path": "/var/log/nginx/backendmgr.stats.log"
+  "stats_log_path": "/var/log/nginx/backendmgr.stats.log",
+
+  "balance_mode": "off",
+  "balance_max_slots_cap": 64
 }
 JSON
   fi
@@ -79,10 +80,15 @@ JSON
 log_format backendmgr_stats '$time_local|$remote_addr|$host|$http_backend|$upstream_addr|$status|$body_bytes_sent|$request_time|$upstream_response_time|$request';
 EOF
 
-  [[ -f "$NGX_APPLY_SNIP" ]] || cat > "$NGX_APPLY_SNIP" <<'EOF'
+  cat > "$NGX_APPLY_SNIP" <<'EOF'
 # Backend Manager Nenenet 3.0 apply.conf
-# Incluir dentro de location / :
+# Debe ir dentro de location / del dominio madre:
 # include /etc/nginx/conf.d/backendmgr/apply.conf;
+
+access_log /var/log/nginx/backendmgr.stats.log backendmgr_stats;
+
+# Rate limit (si está activo en config, el panel lo habilita aquí)
+# Speed limit (limit_rate) lo aplica el panel via maps
 EOF
 
   cat > "$NGX_BALANCER_CONF" <<'EOF'
@@ -95,116 +101,37 @@ map $backendmgr_slot $balanced_backend_url {
     include /etc/nginx/conf.d/backendmgr/balanced.map;
 }
 EOF
+}
 
-  if [[ ! -f "$NGX_MAIN_INCLUDE" ]]; then
-    cat > "$NGX_MAIN_INCLUDE" <<EOF
+# ✅ Este archivo existe solo para “enganchar” el panel a tu nginx.conf
+#    pero tu nginx.conf queda con tu estructura exacta.
+write_backendmgr_http_include() {
+  cat > "$NGX_MAIN_INCLUDE" <<EOF
 # ==========================================================
-# Backend Manager Nenenet 3.0 - include principal (http{})
+# Backend Manager Nenenet 3.0 - include http{}
 # ==========================================================
 include ${NGX_LOGGING_SNIP};
-
-# Mapa para decidir backend basado en header HTTP personalizado
-map \$http_backend \$backend_url {
-    default "http://127.0.0.1:8880";
-    include ${NGX_BACKENDS_MAP};
-}
 
 # req/conn rate-limit
 limit_req_zone \$binary_remote_addr zone=backendmgr_req:10m rate=10r/s;
 limit_conn_zone \$binary_remote_addr zone=backendmgr_conn:10m;
 
-# Balanceador
 include ${NGX_BALANCER_CONF};
 
-# Speed limits (0 = unlimited)
+# speed limits maps (0=unlimited)
 map \$remote_addr \$ip_limit_rate { default 0; include ${NGX_LIMITS_IP}; }
 map \$http_backend \$backend_limit_rate { default 0; include ${NGX_LIMITS_BACKEND}; }
 map \$backend_url \$url_limit_rate { default 0; include ${NGX_LIMITS_URL}; }
 
-# Server blocks generados por el panel
+# servers del panel
 include ${SERVERS_DIR}/*.conf;
 EOF
-  fi
 }
 
-migrate_minimal_nginx_conf() {
+# ✅ Genera /etc/nginx/nginx.conf con tu formato, y engancha includes correctos
+apply_exact_nginx_conf_template() {
   local nginx_conf="/etc/nginx/nginx.conf"
-  [[ -f "$nginx_conf" ]] || return 0
-
-  grep -qF "include ${NGX_MAIN_INCLUDE};" "$nginx_conf" && return 0
-
-  if ! grep -qE 'map\s+\$http_backend\s+\$backend_url' "$nginx_conf"; then
-    return 0
-  fi
-
-  echo "🛠️  Detectado nginx.conf con mapa inline (modo minimal). Migrando a backendmgr..."
   backup_file "$nginx_conf"
-
-  if [[ ! -s "$NGX_BACKENDS_MAP" ]]; then
-    awk '
-      BEGIN{inmap=0}
-      /map[ \t]+\\$http_backend[ \t]+\\$backend_url[ \t]*\\{/ {inmap=1; next}
-      inmap && /}/ {inmap=0; next}
-      inmap {
-        if($0 ~ /\"[^\"]+\"[ \t]+\"http:\/\//){
-          gsub(/^[ \t]+/,""); gsub(/[ \t]*$/,"");
-          if($0 !~ /;[ \t]*$/) $0=$0";"
-          print "    "$0
-        }
-      }
-    ' "$nginx_conf" > "${NGX_BACKENDS_MAP}.tmp" || true
-    mv "${NGX_BACKENDS_MAP}.tmp" "$NGX_BACKENDS_MAP"
-  fi
-
-  local dom cto sto rto
-  dom="$(grep -E '^[ \t]*server_name[ \t]+' "$nginx_conf" | head -n1 | sed -E 's/^[ \t]*server_name[ \t]+([^;]+);.*/\1/' || true)"
-  cto="$(grep -E '^[ \t]*proxy_connect_timeout[ \t]+' "$nginx_conf" | head -n1 | awk '{print $2}' | tr -d ';' || true)"
-  sto="$(grep -E '^[ \t]*proxy_send_timeout[ \t]+' "$nginx_conf" | head -n1 | awk '{print $2}' | tr -d ';' || true)"
-  rto="$(grep -E '^[ \t]*proxy_read_timeout[ \t]+' "$nginx_conf" | head -n1 | awk '{print $2}' | tr -d ';' || true)"
-  cto="${cto:-300s}"; sto="${sto:-600s}"; rto="${rto:-600s}"
-
-  if [[ -n "${dom:-}" ]]; then
-    local cur
-    cur="$(jq -r '.primary_domain' "$CFG_FILE")"
-    if [[ -z "${cur:-}" || "$cur" == "null" ]]; then
-      jq --arg v "$dom" '.primary_domain=$v' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
-    fi
-
-    local f="${SERVERS_DIR}/${dom}.conf"
-    if [[ ! -f "$f" ]]; then
-      local safe="${dom//./_}"
-      cat > "$f" <<EOF
-server {
-    listen 80;
-    listen [::]:80;
-
-    server_name ${dom};
-
-    access_log /var/log/nginx/${safe}.access.log;
-    error_log  /var/log/nginx/${safe}.error.log;
-
-    # Opcional: timeouts largos para backend
-    proxy_connect_timeout ${cto};
-    proxy_send_timeout    ${sto};
-    proxy_read_timeout    ${rto};
-
-    location / {
-        proxy_pass \$backend_url;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-
-        include /etc/nginx/conf.d/backendmgr/apply.conf;
-    }
-}
-EOF
-    fi
-  fi
 
   cat > "$nginx_conf" <<EOF
 worker_processes auto;
@@ -216,28 +143,16 @@ events {
 }
 
 http {
-    # Backend Manager Nenenet 3.0 (incluye mapas/servers/limits)
+    # Mapa para decidir backend basado en header HTTP personalizado
+    map \$http_backend \$backend_url {
+        default "http://127.0.0.1:8880";
+        include ${NGX_BACKENDS_MAP};
+    }
+
+    # Backend Manager (rate-limit, logs, speed-limit, servers, balance)
     include ${NGX_MAIN_INCLUDE};
 }
 EOF
-}
-
-connect_include_into_nginx_conf() {
-  local nginx_conf
-  nginx_conf="$(jq -r '.nginx_conf' "$CFG_FILE")"
-  [[ -f "$nginx_conf" ]] || { echo "No existe: $nginx_conf"; exit 1; }
-
-  if ! grep -qF "include ${NGX_MAIN_INCLUDE};" "$nginx_conf"; then
-    backup_file "$nginx_conf"
-    awk -v inc="    include ${NGX_MAIN_INCLUDE};" '
-      BEGIN{done=0}
-      /^\s*http\s*\{/{
-        print
-        if(!done){ print inc; done=1; next }
-      }
-      {print}
-    ' "$nginx_conf" > "${nginx_conf}.tmp" && mv "${nginx_conf}.tmp" "$nginx_conf"
-  fi
 }
 
 install_wrapper() {
@@ -255,18 +170,17 @@ CFG_REAL="/etc/backendmgr/real_nginx_path"
 REAL="/usr/sbin/nginx"
 [[ -f "$CFG_REAL" ]] && REAL="$(cat "$CFG_REAL" 2>/dev/null || echo /usr/sbin/nginx)"
 
+# sin args => abre panel
 if [[ $# -eq 0 ]]; then
   exec /usr/local/bin/backendmgr
 fi
 
+# atajos
 case "${1:-}" in
   menu|panel|nenenet) exec /usr/local/bin/backendmgr ;;
 esac
 
-case "${1:-}" in
-  -t|-T|-V|-v|-h|-s|-q|-c|-p|-g) exec "$REAL" "$@" ;;
-esac
-
+# passthrough a nginx real
 exec "$REAL" "$@"
 EOF
   chmod +x "$WRAPPER_BIN"
@@ -281,33 +195,31 @@ install_or_update() {
 
   echo "[2/9] Archivos base..."
   write_base_files
+  write_backendmgr_http_include
 
   echo "[3/9] Descargando panel..."
   download_panel
 
-  echo "[4/9] Adaptando nginx.conf (migración si es minimal)..."
-  migrate_minimal_nginx_conf
+  echo "[4/9] Aplicando nginx.conf EXACTO (como tu plantilla)..."
+  apply_exact_nginx_conf_template
 
-  echo "[5/9] Include en nginx.conf (si aplica)..."
-  connect_include_into_nginx_conf || true
-
-  echo "[6/9] Wrapper nginx..."
+  echo "[5/9] Wrapper nginx..."
   install_wrapper
 
-  echo "[7/9] Validando Nginx..."
+  echo "[6/9] Validando Nginx..."
   if ! timeout 12s nginx -t; then
-    echo "⚠️ nginx -t falló o tardó demasiado."
+    echo "⚠️ nginx -t falló."
     echo "   Revisá con: nginx -T | tail -n 120"
     exit 1
   fi
 
-  echo "[8/9] Reload Nginx..."
+  echo "[7/9] Reload Nginx..."
   timeout 8s nginx -s reload >/dev/null 2>&1 || true
 
-  echo "[9/9] Listo."
+  echo "[8/9] Listo."
   echo "Abrir panel: sudo nginx"
   echo
-  read -r -p "¿Abrir panel ahora? (Y/n): " ans
+  read -r -p "[9/9] ¿Abrir panel ahora? (Y/n): " ans
   ans="${ans:-Y}"
   if [[ "$ans" =~ ^[Yy]$ ]]; then
     exec /usr/local/bin/backendmgr
@@ -319,7 +231,8 @@ uninstall_now() {
   rm -f /usr/local/bin/backendmgr
   rm -f /usr/local/bin/nginx
   rm -rf /etc/backendmgr
-  echo "✅ Listo. (No borro /etc/nginx ni backups en /root/backendmgr-backups)"
+  rm -rf /etc/nginx/conf.d/backendmgr
+  echo "✅ Listo. Backups quedan en: /etc/nginx/backendmgr-backups"
 }
 
 menu() {
