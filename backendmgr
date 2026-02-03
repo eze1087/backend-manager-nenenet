@@ -100,8 +100,6 @@ validate_rate() { [[ "$1" == "0" || "$1" =~ ^[0-9]+[kKmM]$ ]]; }
 write_apply_conf() {
   read_cfg
 
-  # Esto se incluye dentro de location / del dominio madre.
-  # Se apoya en maps/zonas definidas en backendmgr.conf (creados por el install).
   cat > "$NGX_APPLY_SNIP" <<EOF
 # ${APP_NAME} apply.conf
 access_log ${STATS_LOG} backendmgr_stats;
@@ -155,7 +153,6 @@ rebuild_balancer_files() {
     [[ $i -ge $cap ]] && break
   done < <(backend_lines)
 
-  # si hay menos de 2 backends, no tiene sentido balancear
   if [[ $i -lt 2 || "$BAL_MODE" == "off" ]]; then
     cat > "$NGX_BALANCER_CONF" <<'EOF'
 # backendmgr balancer.conf (balance OFF)
@@ -173,7 +170,6 @@ EOF
   local base=$((100 / i))
   local rem=$((100 - base * i))
 
-  # random o sticky-ip
   local split_key='$remote_addr'
   [[ "$BAL_MODE" == "random" ]] && split_key='$remote_addr$msec$connection'
 
@@ -276,7 +272,6 @@ create_server_for_domain() {
   local file="${SERVERS_DIR}/${dom}.conf"
   local safe="${dom//./_}"
 
-  # defaults EXACTOS como pediste
   local cto="${2:-300s}"
   local sto="${3:-600s}"
   local rto="${4:-600s}"
@@ -505,7 +500,7 @@ validate_connection_test() {
   echo
 }
 
-# ------------------ FIREWALL UFW (tu opción 13) ------------------
+# ------------------ FIREWALL UFW (opción 13) ------------------
 ufw_open_port() {
   echo -e "${CYA}Firewall UFW: permitir tráfico por puerto${NC}"
   echo -e "${DIM}Ejemplo: 80/tcp (HTTP) o 443/tcp (HTTPS).${NC}\n"
@@ -527,7 +522,7 @@ ufw_open_port() {
   ufw status || true
 }
 
-# ------------------ BACKUP / RESTORE en /etc/nginx ------------------
+# ------------------ BACKUP / RESTORE ------------------
 backup_bundle() {
   mkdir -p "$BACKUP_DIR"
   local out="${BACKUP_DIR}/bundle-$(date +%Y%m%d-%H%M%S).tar.gz"
@@ -555,7 +550,7 @@ restore_bundle() {
   echo -e "${GRN}✅ Restaurado.${NC}"
 }
 
-# ------------------ Servicios Nginx juntos ------------------
+# ------------------ Servicios Nginx ------------------
 nginx_services_menu() {
   echo -e "${CYA}Servicios Nginx${NC}"
   echo " 1) Status"
@@ -577,7 +572,6 @@ nginx_services_menu() {
   esac
 }
 
-# ------------------ MENU ------------------
 menu() {
   echo -e "${WHT}📌 MENÚ PRINCIPAL${NC}"
   echo "  2) ➕ Agregar backend (nombre + IP + puerto)"
@@ -602,7 +596,6 @@ main() {
   read_cfg
   ensure_files
 
-  # asegurar que apply/balance existan (sin romper conexión)
   write_apply_conf >/dev/null 2>&1 || true
   rebuild_balancer_files >/dev/null 2>&1 || true
 
