@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_TITLE="Backend Manager Nenenet 3.0"
-REPO_RAW_BASE="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main"
+REPO_RAW_BASE="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main/backendmgr"
 
 ETC_DIR="/etc/backendmgr"
 CFG_FILE="${ETC_DIR}/config.json"
