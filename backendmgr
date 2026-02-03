@@ -271,7 +271,7 @@ speed_limit_menu() {
   esac
 }
 
-# ------------------ DOMINIOS (OPCIÓN 3 AUTO) ------------------
+# ------------------ DOMINIOS ------------------
 create_server_for_domain() {
   local dom="$1"
   local file="${SERVERS_DIR}/${dom}.conf"
