@@ -2,6 +2,10 @@
 set -euo pipefail
 
 APP_TITLE="Backend Manager Nenenet 3.0"
+
+# ====== URL base del repo (MISMO estilo que venías usando) ======
+# OJO: Si tu repo usa main, esto funciona.
+# Si cambiás de rama, reemplazá "main" por la rama correcta.
 REPO_RAW_BASE="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main"
 
 ETC_DIR="/etc/backendmgr"
@@ -23,10 +27,12 @@ NGX_LIMITS_IP="${NGX_DIR}/limits_ip.map"
 NGX_LIMITS_BACKEND="${NGX_DIR}/limits_backend.map"
 NGX_LIMITS_URL="${NGX_DIR}/limits_url.map"
 
-# ✅ Backups en /etc/nginx
+# ✅ backups/restores en /etc/nginx (misma ubicación)
 BACKUP_DIR="/etc/nginx/backendmgr-backups"
 
-need_root() { [[ ${EUID:-999} -eq 0 ]] || { echo "ERROR: ejecutá como root (sudo)."; exit 1; }; }
+need_root() {
+  [[ ${EUID:-999} -eq 0 ]] || { echo "ERROR: ejecutá como root (sudo)."; exit 1; }
+}
 
 backup_file() {
   local f="$1"
@@ -34,14 +40,48 @@ backup_file() {
   [[ -f "$f" ]] && cp -a "$f" "${BACKUP_DIR}/$(basename "$f").bak-$(date +%Y%m%d-%H%M%S)" || true
 }
 
+# ====== DESCARGA ROBUSTA del panel ======
+# - intenta varias rutas por si GitHub te devuelve 404 en una
+# - esto arregla tu error actual sin romper nada
 download_panel() {
   local tmp
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp" >/dev/null 2>&1 || true' RETURN
 
-  curl -fsSL "${REPO_RAW_BASE}/backendmgr" -o "${tmp}/backendmgr"
+  local ok=0
+  local url=""
+
+  # Lista de URLs candidatos (probamos varios por compatibilidad)
+  # 1) tu forma actual: /refs/heads/main/backendmgr
+  # 2) forma alternativa: /main/backendmgr
+  # 3) fallback por si lo renombraste: backendmgr.sh
+  local candidates=(
+    "${REPO_RAW_BASE}/backendmgr"
+    "https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/main/backendmgr"
+    "${REPO_RAW_BASE}/backendmgr.sh"
+    "https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/main/backendmgr.sh"
+  )
+
+  for u in "${candidates[@]}"; do
+    if curl -fsSL "$u" -o "${tmp}/backendmgr"; then
+      url="$u"
+      ok=1
+      break
+    fi
+  done
+
+  if [[ "$ok" -ne 1 ]]; then
+    echo "ERROR: no pude descargar el panel."
+    echo "Probé estas URLs:"
+    for u in "${candidates[@]}"; do echo " - $u"; done
+    echo
+    echo "✅ Solución: asegurate que en tu repo exista el archivo llamado 'backendmgr' en la rama main."
+    exit 1
+  fi
+
   chmod +x "${tmp}/backendmgr"
   install -m 0755 "${tmp}/backendmgr" "${PANEL_BIN_DST}"
+  echo "✅ Panel descargado desde: $url"
 }
 
 write_base_files() {
@@ -80,7 +120,7 @@ JSON
 log_format backendmgr_stats '$time_local|$remote_addr|$host|$http_backend|$upstream_addr|$status|$body_bytes_sent|$request_time|$upstream_response_time|$request';
 EOF
 
-  # apply.conf lo completa el panel (backendmgr), acá dejamos base segura
+  # apply.conf base (el panel lo actualiza)
   cat > "$NGX_APPLY_SNIP" <<'EOF'
 # Backend Manager Nenenet 3.0 apply.conf
 # (El panel lo mantiene actualizado)
@@ -100,7 +140,6 @@ map $backendmgr_slot $balanced_backend_url {
 EOF
 }
 
-# ✅ include que va dentro de http{} (no rompe tu estructura)
 write_backendmgr_http_include() {
   cat > "$NGX_MAIN_INCLUDE" <<EOF
 # ==========================================================
@@ -108,7 +147,7 @@ write_backendmgr_http_include() {
 # ==========================================================
 include ${NGX_LOGGING_SNIP};
 
-# req/conn rate-limit zones (valores por defecto; el panel ajusta apply.conf)
+# req/conn rate-limit zones (panel ajusta apply.conf)
 limit_req_zone \$binary_remote_addr zone=backendmgr_req:10m rate=10r/s;
 limit_conn_zone \$binary_remote_addr zone=backendmgr_conn:10m;
 
@@ -124,7 +163,7 @@ include ${SERVERS_DIR}/*.conf;
 EOF
 }
 
-# ✅ nginx.conf con tu estructura exacta + include backends.map y backendmgr.conf
+# ✅ NO TOCO tu lógica de conexión: map $http_backend -> $backend_url + includes
 apply_exact_nginx_conf_template() {
   local nginx_conf="/etc/nginx/nginx.conf"
   backup_file "$nginx_conf"
@@ -151,7 +190,7 @@ http {
 EOF
 }
 
-# ✅ FIX DEFINITIVO: wrapper en /usr/sbin/nginx para que "sudo nginx" lo ejecute SIEMPRE
+# ✅ FIX: wrapper en /usr/sbin/nginx para que "sudo nginx" abra menú SIEMPRE
 install_wrapper() {
   local REAL="/usr/sbin/nginx"
   local REAL_REAL="/usr/sbin/nginx.real"
@@ -159,13 +198,12 @@ install_wrapper() {
 
   mkdir -p "$ETC_DIR" "$BACKUP_DIR"
 
-  # Si nginx.real no existe y nginx existe, lo movemos
+  # mover nginx real a nginx.real (si todavía no está)
   if [[ -x "$REAL" && ! -e "$REAL_REAL" ]]; then
     cp -a "$REAL" "${BACKUP_DIR}/nginx.real.bak-$(date +%Y%m%d-%H%M%S)" || true
     mv "$REAL" "$REAL_REAL"
   fi
 
-  # Guardar ruta real
   echo "$REAL_REAL" > "$REAL_NGINX_PATH_FILE" || true
 
   cat > "$WRAP" <<'EOF'
@@ -191,8 +229,6 @@ exec "$REAL" "$@"
 EOF
 
   chmod +x "$WRAP"
-
-  # compat: si alguien llama /usr/local/bin/nginx, que funcione igual
   ln -sf "$WRAP" /usr/local/bin/nginx || true
 }
 
@@ -210,7 +246,7 @@ install_or_update() {
   echo "[3/9] Descargando panel..."
   download_panel
 
-  echo "[4/9] Aplicando nginx.conf (plantilla exacta)..."
+  echo "[4/9] Aplicando nginx.conf (plantilla exacta que conecta)..."
   apply_exact_nginx_conf_template
 
   echo "[5/9] Wrapper nginx (sudo nginx abre menú)..."
@@ -233,7 +269,6 @@ install_or_update() {
   read -r -p "[9/9] ¿Abrir panel ahora? (Y/n): " ans
   ans="${ans:-Y}"
   if [[ "$ans" =~ ^[Yy]$ ]]; then
-    # Abrimos directo para no depender de PATH
     exec /usr/local/bin/backendmgr
   fi
 }
