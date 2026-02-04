@@ -1,70 +1,16 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-# ===================== INIT SAFE (NO QUITA FUNCIONES) =====================
-
-# Forzar TTY (evita "vuelve al prompt" sin mostrar menú)
-if [[ -r /dev/tty && -w /dev/tty ]]; then
-  exec </dev/tty >/dev/tty 2>&1
-fi
-
-CFG_FILE="/etc/backendmgr/config.json"
-
-ensure_root_or_exit() {
-  if [[ ${EUID:-999} -ne 0 ]]; then
-    echo "ERROR: ejecutá el panel como root: sudo nginx"
-    exit 1
-  fi
-}
-
-ensure_jq_or_hint() {
-  if ! command -v jq >/dev/null 2>&1; then
-    echo "ERROR: falta 'jq'. Instalalo con: apt install -y jq"
-    echo
-    read -r -p "¿Instalar jq ahora? (Y/n): " ans || true
-    ans="${ans:-Y}"
-    if [[ "$ans" =~ ^[Yy]$ ]]; then
-      export DEBIAN_FRONTEND=noninteractive
-      apt update -y && apt install -y jq
-    else
-      exit 1
-    fi
-  fi
-}
-
-ensure_cfg_or_create() {
-  if [[ ! -f "$CFG_FILE" ]]; then
-    mkdir -p /etc/backendmgr
-    cat > "$CFG_FILE" <<'JSON'
-{
-  "nginx_conf": "/etc/nginx/nginx.conf",
-  "header_name": "Backend",
-  "primary_domain": "",
-  "rate_limit_enabled": true,
-  "rate_limit_rate": "10r/s",
-  "rate_limit_burst": 20,
-  "conn_limit": 30,
-  "curl_timeout_seconds": 8,
-  "traffic_window_seconds": 60,
-  "stats_log_path": "/var/log/nginx/backendmgr.stats.log",
-  "balance_mode": "off",
-  "balance_max_slots_cap": 64
-}
-JSON
-  fi
-}
-
-ensure_root_or_exit
-ensure_jq_or_hint
-ensure_cfg_or_create
-
-# ===================== TU PANEL (IGUAL QUE ANTES) =====================
+set -Eeuo pipefail
 
 APP_NAME="Backend Manager Nenenet 3.0"
-APP_VER="4.4"
+APP_VER="4.5"
+
+# ------------------ RUTAS ------------------
+CFG_DIR="/etc/backendmgr"
+CFG_FILE="${CFG_DIR}/config.json"
 
 NGX_DIR="/etc/nginx/conf.d/backendmgr"
 SERVERS_DIR="${NGX_DIR}/servers"
+
 NGX_BACKENDS_MAP="${NGX_DIR}/backends.map"
 NGX_APPLY_SNIP="${NGX_DIR}/apply.conf"
 NGX_MAIN_INCLUDE="${NGX_DIR}/backendmgr.conf"
@@ -81,6 +27,11 @@ NGX_LIMITS_URL="${NGX_DIR}/limits_url.map"
 # backups en /etc/nginx (misma ubicación)
 BACKUP_DIR="/etc/nginx/backendmgr-backups"
 
+# Logs
+PANEL_LOG="/var/log/backendmgr.panel.log"
+WRAPPER_LOG="/var/log/backendmgr.wrapper.log"
+
+# ------------------ COLORES ------------------
 NC='\033[0m'
 RED='\033[0;31m'
 GRN='\033[0;32m'
@@ -89,11 +40,82 @@ CYA='\033[0;36m'
 WHT='\033[1;37m'
 DIM='\033[2m'
 
+# ------------------ TTY + TRAPS ------------------
+mkdir -p /var/log 2>/dev/null || true
+
+# Forzar TTY para que SIEMPRE se vea el menú al llamar con nginx
+if [[ -r /dev/tty && -w /dev/tty ]]; then
+  exec </dev/tty >/dev/tty 2>&1
+fi
+
+on_err() {
+  local rc=$?
+  echo -e "${RED}❌ ERROR:${NC} backendmgr rc=${rc} | línea ${LINENO} | cmd: ${BASH_COMMAND}" | tee -a "$PANEL_LOG" >/dev/null
+  echo -e "${YLW}📌 Log:${NC} ${PANEL_LOG}"
+  exit "$rc"
+}
+trap on_err ERR
+
+# Debug opcional:
+# BACKENDMGR_DEBUG=1 nginx
+if [[ "${BACKENDMGR_DEBUG:-0}" == "1" ]]; then
+  exec 3>>"$PANEL_LOG"
+  BASH_XTRACEFD=3
+  set -x
+fi
+
+# ------------------ HELPERS ------------------
 need_root() { [[ ${EUID:-999} -eq 0 ]] || { echo -e "${RED}ERROR:${NC} ejecutá: sudo nginx"; exit 1; }; }
 pause() { echo; read -r -p "Enter para volver al menú..." _; }
 
+ensure_jq() {
+  if command -v jq >/dev/null 2>&1; then return 0; fi
+  echo -e "${YLW}⚠️ Falta jq.${NC} Intento instalarlo..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y >/dev/null 2>&1 || true
+  apt-get install -y jq >/dev/null 2>&1 || true
+  command -v jq >/dev/null 2>&1 || { echo -e "${RED}ERROR:${NC} no pude instalar jq. Hacé: apt install -y jq"; exit 1; }
+}
+
+write_default_cfg() {
+  mkdir -p "$CFG_DIR"
+  cat > "$CFG_FILE" <<'JSON'
+{
+  "header_name": "Backend",
+  "primary_domain": "",
+  "rate_limit_enabled": true,
+  "rate_limit_rate": "10r/s",
+  "rate_limit_burst": 20,
+  "conn_limit": 30,
+  "curl_timeout_seconds": 8,
+  "traffic_window_seconds": 60,
+  "stats_log_path": "/var/log/nginx/backendmgr.stats.log",
+  "balance_mode": "off",
+  "balance_max_slots_cap": 64
+}
+JSON
+}
+
+ensure_cfg() {
+  [[ -f "$CFG_FILE" ]] || write_default_cfg
+}
+
+ensure_files() {
+  mkdir -p "$NGX_DIR" "$SERVERS_DIR" "$BACKUP_DIR" /var/log/nginx /var/lib/backendmgr
+  chmod 700 "$BACKUP_DIR" || true
+
+  [[ -f "$NGX_BACKENDS_MAP" ]] || : > "$NGX_BACKENDS_MAP"
+  [[ -f "$NGX_APPLY_SNIP" ]] || : > "$NGX_APPLY_SNIP"
+  [[ -f "$NGX_BALANCER_CONF" ]] || : > "$NGX_BALANCER_CONF"
+  [[ -f "$NGX_BALANCED_MAP" ]] || : > "$NGX_BALANCED_MAP"
+
+  [[ -f "$NGX_LIMITS_IP" ]] || : > "$NGX_LIMITS_IP"
+  [[ -f "$NGX_LIMITS_BACKEND" ]] || : > "$NGX_LIMITS_BACKEND"
+  [[ -f "$NGX_LIMITS_URL" ]] || : > "$NGX_LIMITS_URL"
+}
+
 read_cfg() {
-  [[ -f "$CFG_FILE" ]] || { echo -e "${RED}Falta ${CFG_FILE}. Reinstalá con install.sh${NC}"; exit 1; }
+  [[ -f "$CFG_FILE" ]] || { echo -e "${RED}Falta ${CFG_FILE}.${NC} Reinstalá con install.sh"; exit 1; }
 
   HEADER_NAME="$(jq -r '.header_name' "$CFG_FILE")"
   PRIMARY_DOMAIN="$(jq -r '.primary_domain' "$CFG_FILE")"
@@ -113,20 +135,6 @@ read_cfg() {
   [[ "$BAL_CAP" == "null" || -z "$BAL_CAP" ]] && BAL_CAP="64"
 }
 
-ensure_files() {
-  mkdir -p "$NGX_DIR" "$SERVERS_DIR" "$BACKUP_DIR" /var/log/nginx
-  chmod 700 "$BACKUP_DIR" || true
-
-  [[ -f "$NGX_BACKENDS_MAP" ]] || : > "$NGX_BACKENDS_MAP"
-  [[ -f "$NGX_APPLY_SNIP" ]] || : > "$NGX_APPLY_SNIP"
-  [[ -f "$NGX_BALANCER_CONF" ]] || : > "$NGX_BALANCER_CONF"
-  [[ -f "$NGX_BALANCED_MAP" ]] || : > "$NGX_BALANCED_MAP"
-
-  [[ -f "$NGX_LIMITS_IP" ]] || : > "$NGX_LIMITS_IP"
-  [[ -f "$NGX_LIMITS_BACKEND" ]] || : > "$NGX_LIMITS_BACKEND"
-  [[ -f "$NGX_LIMITS_URL" ]] || : > "$NGX_LIMITS_URL"
-}
-
 nginx_test_reload() {
   if ! timeout 10s nginx -t; then
     echo -e "${YLW}⚠️ nginx -t falló. No recargo.${NC}"
@@ -140,7 +148,8 @@ banner() {
   clear || true
   echo -e "${CYA}╔══════════════════════════════════════════════════════════════╗${NC}"
   echo -e "${CYA}║${NC}  🚀 ${APP_NAME} v${APP_VER}                                     ${CYA}║${NC}"
-  echo -e "${CYA}║${NC}  Header: ${WHT}${HEADER_NAME}${NC} | Balance: ${WHT}${BAL_MODE}${NC} ${CYA}║${NC}"
+  echo -e "${CYA}║${NC}  Dominio madre: ${WHT}${PRIMARY_DOMAIN:-"(no configurado)"}${NC} | Header: ${WHT}${HEADER_NAME}${NC} ${CYA}║${NC}"
+  echo -e "${CYA}║${NC}  Balance: ${WHT}${BAL_MODE}${NC} | Stats: ${WHT}${STATS_LOG}${NC} ${CYA}║${NC}"
   echo -e "${CYA}╚══════════════════════════════════════════════════════════════╝${NC}"
   echo
 }
@@ -249,7 +258,7 @@ EOF
 
 set_balance_mode() {
   echo -e "${CYA}Balanceador (equilibrar tráfico)${NC}"
-  echo -e "${DIM}OFF = usa header Backend (tu modo). RANDOM = reparte. STICKY-IP = por IP.${NC}\n"
+  echo -e "${DIM}OFF = tu modo (por header). RANDOM = reparte. STICKY-IP = por IP.${NC}\n"
   echo "1) OFF"
   echo "2) RANDOM"
   echo "3) STICKY-IP"
@@ -323,12 +332,60 @@ speed_limit_menu() {
   esac
 }
 
-# ------------------ DOMINIOS ------------------
+# ------------------ LISTAS / PICKS ------------------
+pick_domain() {
+  mapfile -t files < <(server_files)
+  [[ "${#files[@]}" -gt 0 ]] || { echo -e "${YLW}No hay dominios madre creados.${NC}"; return 1; }
+
+  echo -e "${CYA}Elegir dominio madre:${NC}"
+  local i=0
+  for f in "${files[@]}"; do
+    i=$((i+1))
+    dom="$(grep -E '^\s*server_name\s+' "$f" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
+    printf "%-3s) %s\n" "$i" "$dom"
+  done
+  echo
+  read -r -p "Número: " n
+  [[ "$n" =~ ^[0-9]+$ ]] || return 1
+  (( n>=1 && n<=${#files[@]} )) || return 1
+  PICKED_DOMAIN_FILE="${files[$((n-1))]}"
+  PICKED_DOMAIN="$(grep -E '^\s*server_name\s+' "$PICKED_DOMAIN_FILE" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
+  [[ -n "${PICKED_DOMAIN:-}" ]] || return 1
+  return 0
+}
+
+pick_backend() {
+  mapfile -t lines < <(backend_lines)
+  [[ "${#lines[@]}" -gt 0 ]] || { echo -e "${YLW}No hay backends cargados.${NC}"; return 1; }
+
+  echo -e "${CYA}Elegir backend:${NC}"
+  local i=0
+  for line in "${lines[@]}"; do
+    i=$((i+1))
+    key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
+    url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
+    ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
+    printf "%-3s) %-20s -> %s:%s\n" "$i" "$key" "$ip" "$port"
+  done
+  echo
+  read -r -p "Número: " n
+  [[ "$n" =~ ^[0-9]+$ ]] || return 1
+  (( n>=1 && n<=${#lines[@]} )) || return 1
+
+  line="${lines[$((n-1))]}"
+  PICKED_BACKEND="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
+  PICKED_BACKEND_URL="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
+  [[ -n "${PICKED_BACKEND:-}" ]] || return 1
+  return 0
+}
+
+# ------------------ DOMINIO MADRE / SERVER ------------------
 create_server_for_domain() {
   local dom="$1"
   local file="${SERVERS_DIR}/${dom}.conf"
   local safe="${dom//./_}"
 
+  # defaults exactos (300/600/600)
   local cto="${2:-300s}"
   local sto="${3:-600s}"
   local rto="${4:-600s}"
@@ -382,7 +439,7 @@ add_domain_auto_create() {
 
 create_or_edit_server_http() {
   echo -e "${CYA}Editar dominio madre (timeouts)${NC}"
-  echo -e "${DIM}Enter = usar el valor por defecto (300/600/600).${NC}\n"
+  echo -e "${DIM}Enter = default 300/600/600.${NC}\n"
 
   read -r -p "Dominio (ej: cpu2.elnene.site): " dom
   validate_domain "$dom" || { echo -e "${RED}Dominio inválido.${NC}"; return 0; }
@@ -394,8 +451,22 @@ create_or_edit_server_http() {
 
   create_server_for_domain "$dom" "$cto" "$sto" "$rto"
   write_apply_conf
+  rebuild_balancer_files
   nginx_test_reload
   echo -e "${GRN}✅ Actualizado:${NC} ${dom}"
+}
+
+list_domains() {
+  echo -e "${CYA}Dominios madre (servers)${NC}\n"
+  mapfile -t files < <(server_files)
+  [[ "${#files[@]}" -gt 0 ]] || { echo -e "${YLW}No hay dominios creados.${NC}"; return 0; }
+
+  local idx=0
+  for f in "${files[@]}"; do
+    idx=$((idx+1))
+    dom="$(grep -E '^\s*server_name\s+' "$f" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/')"
+    echo "$idx) $dom"
+  done
 }
 
 # ------------------ BACKENDS ------------------
@@ -447,7 +518,7 @@ list_backends() {
 delete_backend_pick() {
   echo -e "${CYA}Eliminar backend${NC}\n"
   mapfile -t lines < <(backend_lines)
-  [[ "${#lines[@]}" -eq 0 ]] && { echo -e "${YLW}No hay backends.${NC}"; return 0; }
+  [[ "${#lines[@]}" -gt 0 ]] || { echo -e "${YLW}No hay backends.${NC}"; return 0; }
 
   local i=0
   for line in "${lines[@]}"; do
@@ -492,46 +563,6 @@ healthcheck_all() {
 }
 
 # ------------------ VALIDAR CONEXIÓN ------------------
-pick_domain() {
-  mapfile -t files < <(server_files)
-  [[ "${#files[@]}" -gt 0 ]] || { echo -e "${YLW}No hay dominios creados.${NC}"; return 1; }
-  echo -e "${CYA}Elegir dominio madre:${NC}"
-  local i=0
-  for f in "${files[@]}"; do
-    i=$((i+1))
-    dom="$(grep -E '^\s*server_name\s+' "$f" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
-    printf "%-3s) %s\n" "$i" "$dom"
-  done
-  read -r -p "Número: " n
-  [[ "$n" =~ ^[0-9]+$ ]] || return 1
-  (( n>=1 && n<=${#files[@]} )) || return 1
-  PICKED_DOMAIN_FILE="${files[$((n-1))]}"
-  PICKED_DOMAIN="$(grep -E '^\s*server_name\s+' "$PICKED_DOMAIN_FILE" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
-  [[ -n "${PICKED_DOMAIN:-}" ]] || return 1
-  return 0
-}
-
-pick_backend() {
-  mapfile -t lines < <(backend_lines)
-  [[ "${#lines[@]}" -gt 0 ]] || { echo -e "${YLW}No hay backends.${NC}"; return 1; }
-  echo -e "${CYA}Elegir backend:${NC}"
-  local i=0
-  for line in "${lines[@]}"; do
-    i=$((i+1))
-    key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
-    url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
-    ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
-    printf "%-3s) %-20s -> %s:%s\n" "$i" "$key" "$ip" "$port"
-  done
-  read -r -p "Número: " n
-  [[ "$n" =~ ^[0-9]+$ ]] || return 1
-  (( n>=1 && n<=${#lines[@]} )) || return 1
-  line="${lines[$((n-1))]}"
-  PICKED_BACKEND="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
-  PICKED_BACKEND_URL="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
-  return 0
-}
-
 validate_connection_test() {
   echo -e "${CYA}Validar conexión (dominio → backend por header)${NC}\n"
   pick_domain || return 0
@@ -548,16 +579,63 @@ validate_connection_test() {
   curl -m "$CURL_TMO" -s -o /dev/null -w "HTTP=%{http_code} TIME=%{time_total}s\n" "http://${PICKED_DOMAIN}/" || true
   echo
 
-  echo -e "${DIM}2) Dominio + header (selección de backend):${NC}"
+  echo -e "${DIM}2) Dominio + header:${NC}"
   curl -m "$CURL_TMO" -s -o /dev/null -w "HTTP=%{http_code} TIME=%{time_total}s\n" -H "${HEADER_NAME}: ${PICKED_BACKEND}" "http://${PICKED_DOMAIN}/" || true
   echo
 
-  echo -e "${DIM}3) Backend directo (comparación):${NC}"
+  echo -e "${DIM}3) Backend directo:${NC}"
   curl -m "$CURL_TMO" -s -o /dev/null -w "HTTP=%{http_code} TIME=%{time_total}s\n" "${PICKED_BACKEND_URL}/" || true
   echo
 }
 
-# ------------------ FIREWALL UFW ------------------
+# ------------------ TRÁFICO (IP / BACKEND) ------------------
+traffic_stats() {
+  read_cfg
+  echo -e "${CYA}Tráfico (por IP o Backend)${NC}"
+  echo -e "${DIM}Lee ${STATS_LOG}. Muestra totales por últimas líneas (si está vacío, no hubo tráfico).${NC}\n"
+
+  [[ -f "$STATS_LOG" ]] || { echo -e "${YLW}No existe todavía: ${STATS_LOG}${NC}"; return 0; }
+  local lines=5000
+  read -r -p "Cantidad de líneas a analizar (Enter=${lines}): " in
+  lines="${in:-$lines}"
+
+  echo
+  echo "1) Por IP"
+  echo "2) Por Backend (header)"
+  read -r -p "Opción: " op
+
+  case "$op" in
+    1)
+      echo
+      printf "%-18s %-12s %-10s\n" "IP" "TOTAL(MB)" "REQ"
+      echo "---------------------------------------------"
+      tail -n "$lines" "$STATS_LOG" | awk -F'|' '
+        {ip=$2; bytes=$7; req[ip]+=1; b[ip]+=bytes}
+        END{
+          for(i in b){
+            mb=b[i]/1024/1024;
+            printf "%-18s %-12.2f %-10d\n", i, mb, req[i]
+          }
+        }' | sort -k2 -nr | head -n 30
+      ;;
+    2)
+      echo
+      printf "%-22s %-12s %-10s\n" "BACKEND" "TOTAL(MB)" "REQ"
+      echo "---------------------------------------------------"
+      tail -n "$lines" "$STATS_LOG" | awk -F'|' '
+        {be=$4; if(be=="") be="(vacío)"; bytes=$7; req[be]+=1; b[be]+=bytes}
+        END{
+          for(i in b){
+            mb=b[i]/1024/1024;
+            printf "%-22s %-12.2f %-10d\n", i, mb, req[i]
+          }
+        }' | sort -k2 -nr | head -n 30
+      ;;
+    *) echo "Opción inválida" ;;
+  esac
+}
+
+# ------------------ FIREWALL UFW (Opción 13) ------------------
 ufw_open_port() {
   echo -e "${CYA}Firewall UFW: permitir tráfico por puerto${NC}"
   echo -e "${DIM}Ejemplo: 80/tcp (HTTP) o 443/tcp (HTTPS).${NC}\n"
@@ -607,7 +685,7 @@ restore_bundle() {
   echo -e "${GRN}✅ Restaurado.${NC}"
 }
 
-# ------------------ Servicios Nginx ------------------
+# ------------------ Servicios Nginx juntos ------------------
 nginx_services_menu() {
   echo -e "${CYA}Servicios Nginx${NC}"
   echo " 1) Status"
@@ -629,17 +707,20 @@ nginx_services_menu() {
   esac
 }
 
+# ------------------ MENU ------------------
 menu() {
   echo -e "${WHT}📌 MENÚ PRINCIPAL${NC}"
   echo "  2) ➕ Agregar backend (nombre + IP + puerto)"
   echo "  3) 🌐 Agregar dominio madre (AUTO crea server)"
   echo "  4) 📄 Listar backends (backend / IP / puerto)"
+  echo "  5) 🌍 Listar dominios madre (servers)"
   echo "  6) 🗑️  Eliminar backend"
   echo "  7) ✅ Healthcheck (HTTP y latencia)"
   echo "  8) 🧪 Validar conexión (dominio → backend por header)"
   echo "  9) 🧩 Editar timeouts del dominio madre (Enter=default 300/600/600)"
   echo " 10) ⚖️ Balanceador (OFF/RANDOM/STICKY-IP)"
   echo " 11) 🚦 Limitar ancho de banda por IP o Backend (limit_rate)"
+  echo " 12) 📊 Tráfico por IP / Backend (stats log)"
   echo " 13) 🔥 Firewall UFW: abrir puerto (80/443/otro)"
   echo " 14) 💾 Backup"
   echo " 15) ♻️  Restaurar backup"
@@ -650,9 +731,12 @@ menu() {
 
 main() {
   need_root
-  read_cfg
+  ensure_jq
+  ensure_cfg
   ensure_files
+  read_cfg
 
+  # asegurar que existan apply/balance (sin romper)
   write_apply_conf >/dev/null 2>&1 || true
   rebuild_balancer_files >/dev/null 2>&1 || true
 
@@ -665,12 +749,14 @@ main() {
       2) add_backend; pause ;;
       3) add_domain_auto_create; pause ;;
       4) list_backends; pause ;;
+      5) list_domains; pause ;;
       6) delete_backend_pick; pause ;;
       7) healthcheck_all; pause ;;
       8) validate_connection_test; pause ;;
       9) create_or_edit_server_http; pause ;;
       10) set_balance_mode; pause ;;
       11) speed_limit_menu; pause ;;
+      12) traffic_stats; pause ;;
       13) ufw_open_port; pause ;;
       14) backup_bundle; pause ;;
       15) restore_bundle; pause ;;
