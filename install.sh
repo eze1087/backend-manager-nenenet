@@ -2,19 +2,19 @@
 set -euo pipefail
 
 APP_NAME="Backend Manager Nenenet 3.0"
-REPO_PANEL_URL="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main/backendmgr"
+PANEL_URL="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main/backendmgr"
 
-ETC_DIR="/etc/backendmgr"
-CFG_FILE="${ETC_DIR}/config.json"
-PANEL_BIN_DST="/usr/local/bin/backendmgr"
+PANEL_DST="/usr/local/bin/backendmgr"
+
+CFG_DIR="/etc/backendmgr"
+CFG_FILE="${CFG_DIR}/config.json"
 
 NGX_DIR="/etc/nginx/conf.d/backendmgr"
 SERVERS_DIR="${NGX_DIR}/servers"
 
-NGX_MAIN_INCLUDE="${NGX_DIR}/backendmgr.conf"
 NGX_BACKENDS_MAP="${NGX_DIR}/backends.map"
 NGX_APPLY_SNIP="${NGX_DIR}/apply.conf"
-NGX_LOGGING_SNIP="${NGX_DIR}/logging.conf"
+NGX_MAIN_INCLUDE="${NGX_DIR}/backendmgr.conf"
 
 NGX_BALANCER_CONF="${NGX_DIR}/balancer.conf"
 NGX_BALANCED_MAP="${NGX_DIR}/balanced.map"
@@ -22,6 +22,8 @@ NGX_BALANCED_MAP="${NGX_DIR}/balanced.map"
 NGX_LIMITS_IP="${NGX_DIR}/limits_ip.map"
 NGX_LIMITS_BACKEND="${NGX_DIR}/limits_backend.map"
 NGX_LIMITS_URL="${NGX_DIR}/limits_url.map"
+
+NGX_LOGGING_SNIP="${NGX_DIR}/logging.conf"
 
 BACKUP_DIR="/etc/nginx/backendmgr-backups"
 
@@ -34,10 +36,9 @@ backup_file(){
 }
 
 write_default_cfg(){
-  mkdir -p "$ETC_DIR"
+  mkdir -p "$CFG_DIR"
   cat > "$CFG_FILE" <<'JSON'
 {
-  "nginx_conf": "/etc/nginx/nginx.conf",
   "header_name": "Backend",
   "primary_domain": "",
   "rate_limit_enabled": true,
@@ -53,26 +54,9 @@ write_default_cfg(){
 JSON
 }
 
-download_panel(){
-  echo "[3/8] Descargando panel..."
-  curl -fsSL "$REPO_PANEL_URL" -o /tmp/backendmgr || {
-    echo "ERROR: no pude descargar backendmgr desde: $REPO_PANEL_URL"
-    exit 1
-  }
-  sed -i 's/\r$//' /tmp/backendmgr || true
-
-  head -n1 /tmp/backendmgr | grep -q '^#!/' || sed -i '1i#!/usr/bin/env bash' /tmp/backendmgr
-
-  # validar sintaxis
-  bash -n /tmp/backendmgr || { echo "ERROR: backendmgr tiene errores de sintaxis"; exit 1; }
-
-  install -m 0755 /tmp/backendmgr "$PANEL_BIN_DST"
-}
-
-write_base_files(){
-  mkdir -p "$ETC_DIR" "$NGX_DIR" "$SERVERS_DIR" "$BACKUP_DIR" /var/lib/backendmgr /var/log/nginx
+make_dirs(){
+  mkdir -p "$CFG_DIR" "$NGX_DIR" "$SERVERS_DIR" "$BACKUP_DIR" /var/log/nginx /var/lib/backendmgr
   chmod 700 "$BACKUP_DIR" || true
-
   [[ -f "$CFG_FILE" ]] || write_default_cfg
 
   [[ -f "$NGX_BACKENDS_MAP" ]] || : > "$NGX_BACKENDS_MAP"
@@ -83,18 +67,20 @@ write_base_files(){
   [[ -f "$NGX_LIMITS_IP" ]] || : > "$NGX_LIMITS_IP"
   [[ -f "$NGX_LIMITS_BACKEND" ]] || : > "$NGX_LIMITS_BACKEND"
   [[ -f "$NGX_LIMITS_URL" ]] || : > "$NGX_LIMITS_URL"
+}
 
+write_snippets(){
   cat > "$NGX_LOGGING_SNIP" <<'EOF'
 log_format backendmgr_stats '$time_local|$remote_addr|$host|$http_backend|$upstream_addr|$status|$body_bytes_sent|$request_time|$upstream_response_time|$request';
 EOF
 
-  # apply.conf base (panel lo reescribe)
+  # apply.conf base (panel lo reescribe completo igual)
   cat > "$NGX_APPLY_SNIP" <<'EOF'
 # Backend Manager Nenenet 3.0 apply.conf
 access_log /var/log/nginx/backendmgr.stats.log backendmgr_stats;
 EOF
 
-  # balancer.conf base (OFF)
+  # balancer.conf base OFF
   cat > "$NGX_BALANCER_CONF" <<'EOF'
 # backendmgr balancer.conf (balance OFF)
 map $host $backendmgr_balance { default 0; }
@@ -106,28 +92,42 @@ map $backendmgr_slot $balanced_backend_url {
 }
 EOF
 
+  # backendmgr.conf: maps + servers
   cat > "$NGX_MAIN_INCLUDE" <<EOF
 include ${NGX_LOGGING_SNIP};
 
+# rate-limit zones
 limit_req_zone \$binary_remote_addr zone=backendmgr_req:10m rate=10r/s;
 limit_conn_zone \$binary_remote_addr zone=backendmgr_conn:10m;
 
+# balancer conf
 include ${NGX_BALANCER_CONF};
 
+# speed-limit maps
 map \$remote_addr \$ip_limit_rate { default 0; include ${NGX_LIMITS_IP}; }
 map \$http_backend \$backend_limit_rate { default 0; include ${NGX_LIMITS_BACKEND}; }
 map \$backend_url \$url_limit_rate { default 0; include ${NGX_LIMITS_URL}; }
 
+# servers
 include ${SERVERS_DIR}/*.conf;
 EOF
 }
 
-ensure_nginx_conf_no_break(){
+download_panel(){
+  echo "[3/9] Descargando panel..."
+  curl -fsSL "$PANEL_URL" -o /tmp/backendmgr || { echo "ERROR: no pude bajar backendmgr."; exit 1; }
+  sed -i 's/\r$//' /tmp/backendmgr || true
+  bash -n /tmp/backendmgr || { echo "ERROR: backendmgr tiene errores de sintaxis."; exit 1; }
+  install -m 0755 /tmp/backendmgr "$PANEL_DST"
+}
+
+ensure_nginx_conf_include(){
   local nginx_conf="/etc/nginx/nginx.conf"
   backup_file "$nginx_conf"
 
-  # si ya tiene tu map, no lo tocamos (solo insertamos include si falta)
-  if [[ -f "$nginx_conf" ]] && grep -q 'map\s\+\$http_backend\s\+\$backend_url' "$nginx_conf"; then
+  # Si ya tiene map $http_backend $backend_url, NO lo tocamos.
+  if grep -q 'map\s\+\$http_backend\s\+\$backend_url' "$nginx_conf"; then
+    # Solo agregamos include dentro de http{} si falta
     if ! grep -q '/etc/nginx/conf.d/backendmgr/backendmgr.conf' "$nginx_conf"; then
       awk '
         BEGIN{ins=0}
@@ -142,7 +142,7 @@ ensure_nginx_conf_no_break(){
     return 0
   fi
 
-  # si no existe o no está en formato, generamos uno compatible con tu modelo
+  # Si no existe el map (instalación limpia), armamos uno compatible con tu modelo.
   cat > "$nginx_conf" <<EOF
 worker_processes auto;
 pid /run/nginx.pid;
@@ -162,12 +162,11 @@ EOF
 }
 
 install_wrapper_nginx(){
-  echo "[6/8] Wrapper nginx (nginx abre menú)..."
-
+  echo "[7/9] Wrapper nginx..."
   local SBIN="/usr/sbin/nginx"
   local REAL="/usr/sbin/nginx.real"
 
-  # preservar nginx real
+  # mover binario real una vez
   if [[ -x "$SBIN" && ! -x "$REAL" ]]; then
     cp -a "$SBIN" "${BACKUP_DIR}/nginx.sbin.bak-$(date +%Y%m%d-%H%M%S)" || true
     mv "$SBIN" "$REAL"
@@ -195,7 +194,7 @@ run_panel() {
     return 127
   fi
 
-  # CLAVE: no morir por set -e si el panel devuelve rc!=0
+  # CLAVE: no morir por set -e si el panel sale rc!=0
   set +e
   if [[ -r /dev/tty && -w /dev/tty ]]; then
     </dev/tty >/dev/tty 2>&1 "$PANEL"
@@ -238,34 +237,37 @@ WRAP
   chmod +x "$SBIN"
   ln -sf /usr/sbin/nginx /usr/local/bin/nginx 2>/dev/null || true
   ln -sf /usr/sbin/nginx /usr/bin/nginx 2>/dev/null || true
-
   bash -n /usr/sbin/nginx
 }
 
 main(){
   need_root
-  echo "[1/8] Dependencias..."
   export DEBIAN_FRONTEND=noninteractive
-  apt update -y
-  apt install -y nginx curl jq gawk sed grep coreutils iproute2 net-tools nano ufw
 
-  echo "[2/8] Archivos base..."
-  write_base_files
+  echo "[1/9] Dependencias..."
+  apt-get update -y
+  apt-get install -y nginx curl jq gawk sed grep coreutils iproute2 net-tools ufw
+
+  echo "[2/9] Directorios..."
+  make_dirs
 
   download_panel
 
-  echo "[4/8] nginx.conf (sin romper tu config)..."
-  ensure_nginx_conf_no_break
+  echo "[4/9] Snippets..."
+  write_snippets
 
-  echo "[5/8] Validando Nginx..."
+  echo "[5/9] nginx.conf include..."
+  ensure_nginx_conf_include
+
+  echo "[6/9] Validando Nginx..."
   nginx -t
 
   install_wrapper_nginx
 
-  echo "[7/8] Reload..."
+  echo "[8/9] Reload..."
   nginx -s reload >/dev/null 2>&1 || true
 
-  echo "[8/8] ✅ Listo. Abrir panel con: nginx  (o sudo nginx)"
+  echo "[9/9] ✅ Listo. Abrir panel con: nginx  (o sudo nginx)"
 }
 
 main
