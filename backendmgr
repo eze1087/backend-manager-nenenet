@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Backend Manager Nenenet 3.0"
-APP_VER="4.7"
+APP_VER="4.8"
 
 # ------------------ RUTAS ------------------
 CFG_DIR="/etc/backendmgr"
@@ -68,7 +68,7 @@ fi
 
 # ------------------ HELPERS ------------------
 need_root() { [[ ${EUID:-999} -eq 0 ]] || { echo -e "${RED}ERROR:${NC} ejecutá: sudo nginx"; exit 1; }; }
-pause() { echo; read -r -p "Enter para volver al menú..." _; }
+pause() { echo; read -r -p "Enter para volver..." _; }
 
 ensure_jq() {
   if command -v jq >/dev/null 2>&1; then return 0; fi
@@ -125,7 +125,6 @@ log_format backendmgr_stats '$time_local|$remote_addr|$host|$http_backend|$upstr
 EOF
 }
 
-# ✅ FIX DEFINITIVO: read_cfg robusto (no rompe aunque falten keys)
 read_cfg() {
   [[ -f "$CFG_FILE" ]] || { echo -e "${RED}Falta ${CFG_FILE}. Reinstalá con install.sh${NC}"; exit 1; }
 
@@ -180,12 +179,9 @@ validate_key() { [[ "$1" =~ ^[A-Za-z0-9_.:-]{2,64}$ ]]; }
 validate_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 validate_rate() { [[ "$1" == "0" || "$1" =~ ^[0-9]+[kKmM]$ ]]; }
 
-# ------------------ http{} include FIX (nenenet_backend_url + nenenet_rate) ------------------
+# ------------------ http{} include (nenenet_backend_url + nenenet_rate) ------------------
 ensure_http_conf_maps() {
-  # Si backendmgr.conf no existe, no lo tocamos acá (lo crea el install).
   [[ -f "$NGX_MAIN_INCLUDE" ]] || return 0
-
-  # Solo reescribimos si NO contiene estas variables (para no pisar cambios)
   if grep -q 'nenenet_backend_url' "$NGX_MAIN_INCLUDE" && grep -q 'nenenet_rate' "$NGX_MAIN_INCLUDE"; then
     return 0
   fi
@@ -194,19 +190,15 @@ ensure_http_conf_maps() {
 # ${APP_NAME} (http{})
 include ${NGX_LOGGING_SNIP};
 
-# rate-limit zones (la rate real se aplica con limit_req, este rate es base)
 limit_req_zone \$binary_remote_addr zone=backendmgr_req:10m rate=10r/s;
 limit_conn_zone \$binary_remote_addr zone=backendmgr_conn:10m;
 
-# balancer conf (define backendmgr_balance / balanced_backend_url)
 include ${NGX_BALANCER_CONF};
 
-# Speed-limit maps
 map \$remote_addr \$ip_limit_rate { default 0; include ${NGX_LIMITS_IP}; }
 map \$http_backend \$backend_limit_rate { default 0; include ${NGX_LIMITS_BACKEND}; }
 map \$backend_url \$url_limit_rate { default 0; include ${NGX_LIMITS_URL}; }
 
-# Prioridad rate: Backend > URL > IP
 map \$backend_limit_rate \$nenenet_rate_step1 {
   default \$backend_limit_rate;
   0 \$url_limit_rate;
@@ -216,19 +208,16 @@ map \$nenenet_rate_step1 \$nenenet_rate {
   0 \$ip_limit_rate;
 }
 
-# Backend URL efectivo: si balance=1 usar balanceado, si no usar header normal
 map \$backendmgr_balance \$nenenet_backend_url {
   0 \$backend_url;
   1 \$balanced_backend_url;
 }
 
-# servers
 include ${SERVERS_DIR}/*.conf;
 EOF
 }
 
-# ------------------ APPLY.CONF (rate + speed) ------------------
-# ✅ CORREGIDO: apply.conf YA NO LLEVA if/set (evita "if not allowed here")
+# ------------------ APPLY.CONF ------------------
 write_apply_conf() {
   read_cfg
 
@@ -332,6 +321,7 @@ set_balance_mode() {
   write_apply_conf
   nginx_test_reload
   echo -e "${GRN}✅ Balance: ${new}${NC}"
+  return 0
 }
 
 # ------------------ SPEED LIMIT ------------------
@@ -367,6 +357,7 @@ speed_limit_menu() {
       write_apply_conf
       nginx_test_reload
       echo -e "${GRN}✅ OK.${NC}"
+      return 0
       ;;
     2)
       read -r -p "Backend (ej svpnene38): " key
@@ -378,6 +369,7 @@ speed_limit_menu() {
       write_apply_conf
       nginx_test_reload
       echo -e "${GRN}✅ OK.${NC}"
+      return 0
       ;;
     3)
       : > "$NGX_LIMITS_IP"
@@ -386,8 +378,9 @@ speed_limit_menu() {
       write_apply_conf
       nginx_test_reload
       echo -e "${GRN}✅ Límites limpiados.${NC}"
+      return 0
       ;;
-    *) echo "Opción inválida" ;;
+    *) echo "Opción inválida"; return 0 ;;
   esac
 }
 
@@ -489,6 +482,7 @@ add_domain_auto_create() {
   rebuild_balancer_files
   nginx_test_reload
   echo -e "${GRN}✅ Dominio madre creado:${NC} ${dom} (80)"
+  return 0
 }
 
 create_or_edit_server_http() {
@@ -509,6 +503,7 @@ create_or_edit_server_http() {
   rebuild_balancer_files
   nginx_test_reload
   echo -e "${GRN}✅ Actualizado:${NC} ${dom}"
+  return 0
 }
 
 list_domains() {
@@ -521,6 +516,98 @@ list_domains() {
     idx=$((idx+1))
     dom="$(grep -E '^\s*server_name\s+' "$f" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/')"
     echo "$idx) $dom"
+  done
+  return 0
+}
+
+# ---- NUEVO: gestión de dominios madre (editar/eliminar) ----
+pick_domain_for_manage() {
+  mapfile -t files < <(server_files)
+  [[ "${#files[@]}" -gt 0 ]] || { echo -e "${YLW}No hay dominios madre creados.${NC}"; return 1; }
+
+  echo -e "${CYA}Elegir dominio madre:${NC}"
+  local i=0
+  for f in "${files[@]}"; do
+    i=$((i+1))
+    dom="$(grep -E '^\s*server_name\s+' "$f" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
+    printf "%-3s) %s\n" "$i" "$dom"
+  done
+  echo
+  read -r -p "Número: " n
+  [[ "$n" =~ ^[0-9]+$ ]] || return 1
+  (( n>=1 && n<=${#files[@]} )) || return 1
+
+  PICKED_DOMAIN_FILE="${files[$((n-1))]}"
+  PICKED_DOMAIN="$(grep -E '^\s*server_name\s+' "$PICKED_DOMAIN_FILE" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
+  [[ -n "${PICKED_DOMAIN:-}" ]] || return 1
+  return 0
+}
+
+edit_domain_pick() {
+  echo -e "${CYA}Editar dominio madre (timeouts)${NC}"
+  echo -e "${DIM}Elegís un dominio de la lista. Enter = default 300/600/600.${NC}\n"
+
+  pick_domain_for_manage || return 0
+
+  read -r -p "proxy_connect_timeout (Enter=300s): " cto
+  read -r -p "proxy_send_timeout    (Enter=600s): " sto
+  read -r -p "proxy_read_timeout    (Enter=600s): " rto
+  cto="${cto:-300s}"; sto="${sto:-600s}"; rto="${rto:-600s}"
+
+  create_server_for_domain "$PICKED_DOMAIN" "$cto" "$sto" "$rto"
+
+  ensure_http_conf_maps
+  write_apply_conf
+  rebuild_balancer_files
+  nginx_test_reload
+
+  echo -e "${GRN}✅ Dominio actualizado:${NC} ${PICKED_DOMAIN}"
+  return 0
+}
+
+delete_domain_pick() {
+  echo -e "${CYA}Eliminar dominio madre${NC}"
+  echo -e "${DIM}Borra el server .conf del dominio (no toca backends).${NC}\n"
+
+  pick_domain_for_manage || return 0
+
+  echo -e "${YLW}Vas a eliminar:${NC} ${PICKED_DOMAIN}"
+  read -r -p "Confirmar (s/N): " yn
+  case "${yn,,}" in
+    s|si|sí|y|yes) ;;
+    *) echo -e "${YLW}Cancelado.${NC}"; return 0 ;;
+  esac
+
+  rm -f "$PICKED_DOMAIN_FILE" || true
+
+  ensure_http_conf_maps
+  write_apply_conf
+  rebuild_balancer_files
+  nginx_test_reload
+
+  echo -e "${GRN}✅ Dominio eliminado:${NC} ${PICKED_DOMAIN}"
+  return 0
+}
+
+domains_menu() {
+  while true; do
+    echo -e "${CYA}Dominios madre${NC}"
+    echo " 1) ➕ Agregar dominio madre (AUTO crea server)"
+    echo " 2) ✏️  Editar dominio madre (elegir de lista)"
+    echo " 3) 🗑️  Eliminar dominio madre (elegir de lista)"
+    echo " 4) 📃 Listar dominios madre"
+    echo " 0) Volver"
+    echo
+    read -r -p "Opción: " op
+    echo
+    case "$op" in
+      1) add_domain_auto_create; pause ;;
+      2) edit_domain_pick; pause ;;
+      3) delete_domain_pick; pause ;;
+      4) list_domains; pause ;;
+      0) return 0 ;;
+      *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
+    esac
   done
 }
 
@@ -556,7 +643,6 @@ add_backend() {
   ensure_http_conf_maps
   write_apply_conf
   nginx_test_reload
-
   return 0
 }
 
@@ -609,7 +695,6 @@ delete_backend_pick() {
   ensure_http_conf_maps
   write_apply_conf
   nginx_test_reload
-
   echo -e "${GRN}✅ Eliminado.${NC}"
   return 0
 }
@@ -632,6 +717,7 @@ healthcheck_all() {
     ms="$(awk -v x="$t" 'BEGIN{printf "%.0f", x*1000}')"
     printf "%-22s %-18s %-6s %-6s %-10s\n" "$key" "$ip" "$port" "$code" "$ms"
   done < <(backend_lines)
+  return 0
 }
 
 # ------------------ VALIDAR CONEXIÓN ------------------
@@ -659,6 +745,7 @@ validate_connection_test() {
   echo -e "${DIM}3) Backend directo:${NC}"
   curl -m "$CURL_TMO" -s -o /dev/null -w "HTTP=%{http_code} TIME=%{time_total}s\n" "${PICKED_BACKEND_URL}/" || true
   echo
+  return 0
 }
 
 # ------------------ TRÁFICO (IP / BACKEND) ------------------
@@ -707,9 +794,11 @@ traffic_stats() {
       ;;
     *) echo "Opción inválida" ;;
   esac
+
+  return 0
 }
 
-# ------------------ FIREWALL UFW (Opción 13 original) ------------------
+# ------------------ FIREWALL UFW ------------------
 ufw_open_port() {
   echo -e "${CYA}Firewall UFW: permitir tráfico por puerto${NC}"
   echo -e "${DIM}Ejemplo: 80/tcp (HTTP) o 443/tcp (HTTPS).${NC}\n"
@@ -729,6 +818,7 @@ ufw_open_port() {
 
   echo -e "${GRN}✅ Regla aplicada.${NC}"
   ufw status || true
+  return 0
 }
 
 # ------------------ BACKUP / RESTORE ------------------
@@ -741,6 +831,7 @@ backup_bundle() {
     /etc/backendmgr \
     /var/lib/backendmgr 2>/dev/null || true
   echo -e "${GRN}✅ Backup creado:${NC} $out"
+  return 0
 }
 
 restore_bundle() {
@@ -758,9 +849,10 @@ restore_bundle() {
   rebuild_balancer_files
   nginx_test_reload
   echo -e "${GRN}✅ Restaurado.${NC}"
+  return 0
 }
 
-# ------------------ Servicios Nginx juntos ------------------
+# ------------------ Servicios Nginx ------------------
 nginx_services_menu() {
   echo -e "${CYA}Servicios Nginx${NC}"
   echo " 1) Status"
@@ -780,19 +872,20 @@ nginx_services_menu() {
     0) return 0 ;;
     *) echo "Opción inválida" ;;
   esac
+  return 0
 }
 
 # ------------------ MENU ------------------
 menu() {
   echo -e "${WHT}📌 MENÚ PRINCIPAL${NC}"
-  echo "  1) 🌐 Agregar dominio madre (AUTO crea server)"
+  echo "  1) 🌐 Dominios madre (crear / editar / eliminar)"
   echo "  2) ➕ Agregar backend (nombre + IP + puerto)"
   echo "  3) 📄 Listar backends (backend / IP / puerto)"
   echo "  4) 🌍 Listar dominios madre (servers)"
   echo "  5) 🗑️  Eliminar backend"
   echo "  6) ✅ Healthcheck (HTTP y latencia)"
   echo "  7) 🧪 Validar conexión (dominio → backend por header)"
-  echo "  8) 🧩 Editar timeouts del dominio madre (Enter=default 300/600/600)"
+  echo "  8) 🧩 Editar timeouts del dominio madre (manual por nombre)"
   echo "  9) ⚖️ Balanceador (OFF/RANDOM/STICKY-IP)"
   echo " 10) 🚦 Limitar ancho de banda por IP o Backend (limit_rate)"
   echo " 11) 📊 Tráfico por IP / Backend (stats log)"
@@ -811,10 +904,7 @@ main() {
   ensure_files
   read_cfg
 
-  # ✅ Asegurar maps/variables dentro de http{} (para que proxy_pass use $nenenet_backend_url)
   ensure_http_conf_maps
-
-  # ✅ apply.conf sin if/set + balance files
   write_apply_conf >/dev/null 2>&1 || true
   rebuild_balancer_files >/dev/null 2>&1 || true
 
@@ -825,7 +915,7 @@ main() {
     echo
 
     case "$opt" in
-      1) add_domain_auto_create; pause ;;
+      1) domains_menu ;;
       2) add_backend; pause ;;
       3) list_backends; pause ;;
       4) list_domains; pause ;;
