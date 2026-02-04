@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Backend Manager Nenenet 3.0"
-APP_VER="4.6"
+APP_VER="4.7"
 
 # ------------------ RUTAS ------------------
 CFG_DIR="/etc/backendmgr"
@@ -23,6 +23,9 @@ NGX_BALANCED_MAP="${NGX_DIR}/balanced.map"
 NGX_LIMITS_IP="${NGX_DIR}/limits_ip.map"
 NGX_LIMITS_BACKEND="${NGX_DIR}/limits_backend.map"
 NGX_LIMITS_URL="${NGX_DIR}/limits_url.map"
+
+# Logging snippet
+NGX_LOGGING_SNIP="${NGX_DIR}/logging.conf"
 
 # backups en /etc/nginx (misma ubicación)
 BACKUP_DIR="/etc/nginx/backendmgr-backups"
@@ -97,7 +100,8 @@ JSON
 
 ensure_cfg() {
   [[ -f "$CFG_FILE" ]] || write_default_cfg
-  # Asegurar key balance_max_slots_cap en configs viejos
+  # asegurar key balance_max_slots_cap en configs viejos
+  local tmp
   tmp="$(mktemp)"
   jq '.balance_max_slots_cap = (.balance_max_slots_cap // 64)' "$CFG_FILE" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
   mv "$tmp" "$CFG_FILE"
@@ -115,6 +119,10 @@ ensure_files() {
   [[ -f "$NGX_LIMITS_IP" ]] || : > "$NGX_LIMITS_IP"
   [[ -f "$NGX_LIMITS_BACKEND" ]] || : > "$NGX_LIMITS_BACKEND"
   [[ -f "$NGX_LIMITS_URL" ]] || : > "$NGX_LIMITS_URL"
+
+  [[ -f "$NGX_LOGGING_SNIP" ]] || cat > "$NGX_LOGGING_SNIP" <<'EOF'
+log_format backendmgr_stats '$time_local|$remote_addr|$host|$http_backend|$upstream_addr|$status|$body_bytes_sent|$request_time|$upstream_response_time|$request';
+EOF
 }
 
 # ✅ FIX DEFINITIVO: read_cfg robusto (no rompe aunque falten keys)
@@ -172,18 +180,61 @@ validate_key() { [[ "$1" =~ ^[A-Za-z0-9_.:-]{2,64}$ ]]; }
 validate_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 validate_rate() { [[ "$1" == "0" || "$1" =~ ^[0-9]+[kKmM]$ ]]; }
 
-# ------------------ APPLY.CONF (rate + balance + speed) ------------------
+# ------------------ http{} include FIX (nenenet_backend_url + nenenet_rate) ------------------
+ensure_http_conf_maps() {
+  # Si backendmgr.conf no existe, no lo tocamos acá (lo crea el install).
+  [[ -f "$NGX_MAIN_INCLUDE" ]] || return 0
+
+  # Solo reescribimos si NO contiene estas variables (para no pisar cambios)
+  if grep -q 'nenenet_backend_url' "$NGX_MAIN_INCLUDE" && grep -q 'nenenet_rate' "$NGX_MAIN_INCLUDE"; then
+    return 0
+  fi
+
+  cat > "$NGX_MAIN_INCLUDE" <<EOF
+# ${APP_NAME} (http{})
+include ${NGX_LOGGING_SNIP};
+
+# rate-limit zones (la rate real se aplica con limit_req, este rate es base)
+limit_req_zone \$binary_remote_addr zone=backendmgr_req:10m rate=10r/s;
+limit_conn_zone \$binary_remote_addr zone=backendmgr_conn:10m;
+
+# balancer conf (define backendmgr_balance / balanced_backend_url)
+include ${NGX_BALANCER_CONF};
+
+# Speed-limit maps
+map \$remote_addr \$ip_limit_rate { default 0; include ${NGX_LIMITS_IP}; }
+map \$http_backend \$backend_limit_rate { default 0; include ${NGX_LIMITS_BACKEND}; }
+map \$backend_url \$url_limit_rate { default 0; include ${NGX_LIMITS_URL}; }
+
+# Prioridad rate: Backend > URL > IP
+map \$backend_limit_rate \$nenenet_rate_step1 {
+  default \$backend_limit_rate;
+  0 \$url_limit_rate;
+}
+map \$nenenet_rate_step1 \$nenenet_rate {
+  default \$nenenet_rate_step1;
+  0 \$ip_limit_rate;
+}
+
+# Backend URL efectivo: si balance=1 usar balanceado, si no usar header normal
+map \$backendmgr_balance \$nenenet_backend_url {
+  0 \$backend_url;
+  1 \$balanced_backend_url;
+}
+
+# servers
+include ${SERVERS_DIR}/*.conf;
+EOF
+}
+
+# ------------------ APPLY.CONF (rate + speed) ------------------
+# ✅ CORREGIDO: apply.conf YA NO LLEVA if/set (evita "if not allowed here")
 write_apply_conf() {
   read_cfg
 
   cat > "$NGX_APPLY_SNIP" <<EOF
 # ${APP_NAME} apply.conf
 access_log ${STATS_LOG} backendmgr_stats;
-
-# Balance: si está activo, pisa backend_url por el balanceado
-if (\$backendmgr_balance = 1) {
-    set \$backend_url \$balanced_backend_url;
-}
 
 EOF
 
@@ -201,14 +252,7 @@ EOF
 
   cat >> "$NGX_APPLY_SNIP" <<'EOF'
 
-# Speed limits (0 = unlimited)
-# prioridad: Backend(key) > URL(actual) > IP
-set $nenenet_rate 0;
-
-if ($backend_limit_rate != 0) { set $nenenet_rate $backend_limit_rate; }
-if ($nenenet_rate = 0) { if ($url_limit_rate != 0) { set $nenenet_rate $url_limit_rate; } }
-if ($nenenet_rate = 0) { if ($ip_limit_rate != 0) { set $nenenet_rate $ip_limit_rate; } }
-
+# Speed limits (0 = unlimited) calculado en http{} por maps
 limit_rate $nenenet_rate;
 EOF
 }
@@ -223,6 +267,7 @@ rebuild_balancer_files() {
   local i=0
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
+    local url
     url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
     printf "    \"%s\" \"%s\";\n" "$i" "$url" >> "$NGX_BALANCED_MAP"
     i=$((i+1))
@@ -254,7 +299,7 @@ EOF
     echo "map \$host \$backendmgr_balance { default 1; }"
     echo "split_clients \"${split_key}\" \$backendmgr_slot {"
     for ((n=0;n<i;n++)); do
-      pct="$base"
+      local pct="$base"
       if (( rem > 0 )); then pct=$((pct+1)); rem=$((rem-1)); fi
       echo "    ${pct}% \"${n}\";"
     done
@@ -283,6 +328,7 @@ set_balance_mode() {
   jq --arg v "$new" '.balance_mode=$v' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
   read_cfg
   rebuild_balancer_files
+  ensure_http_conf_maps
   write_apply_conf
   nginx_test_reload
   echo -e "${GRN}✅ Balance: ${new}${NC}"
@@ -317,6 +363,7 @@ speed_limit_menu() {
       read -r -p "Velocidad (ej 2m, 512k, 0=unlimited): " rate
       validate_rate "$rate" || { echo -e "${RED}Rate inválido.${NC}"; return 0; }
       map_set_line "$NGX_LIMITS_IP" "$ip" "$rate" "noquote"
+      ensure_http_conf_maps
       write_apply_conf
       nginx_test_reload
       echo -e "${GRN}✅ OK.${NC}"
@@ -327,6 +374,7 @@ speed_limit_menu() {
       read -r -p "Velocidad (ej 2m, 512k, 0=unlimited): " rate
       validate_rate "$rate" || { echo -e "${RED}Rate inválido.${NC}"; return 0; }
       map_set_line "$NGX_LIMITS_BACKEND" "$key" "$rate" "quote"
+      ensure_http_conf_maps
       write_apply_conf
       nginx_test_reload
       echo -e "${GRN}✅ OK.${NC}"
@@ -334,6 +382,7 @@ speed_limit_menu() {
     3)
       : > "$NGX_LIMITS_IP"
       : > "$NGX_LIMITS_BACKEND"
+      ensure_http_conf_maps
       write_apply_conf
       nginx_test_reload
       echo -e "${GRN}✅ Límites limpiados.${NC}"
@@ -411,7 +460,7 @@ server {
     proxy_read_timeout    ${rto};
 
     location / {
-        proxy_pass \$backend_url;
+        proxy_pass \$nenenet_backend_url;
 
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -435,6 +484,7 @@ add_domain_auto_create() {
   validate_domain "$dom" || { echo -e "${RED}Dominio inválido.${NC}"; return 0; }
 
   create_server_for_domain "$dom" "300s" "600s" "600s"
+  ensure_http_conf_maps
   write_apply_conf
   rebuild_balancer_files
   nginx_test_reload
@@ -454,6 +504,7 @@ create_or_edit_server_http() {
   cto="${cto:-300s}"; sto="${sto:-600s}"; rto="${rto:-600s}"
 
   create_server_for_domain "$dom" "$cto" "$sto" "$rto"
+  ensure_http_conf_maps
   write_apply_conf
   rebuild_balancer_files
   nginx_test_reload
@@ -499,6 +550,7 @@ add_backend() {
   fi
 
   rebuild_balancer_files
+  ensure_http_conf_maps
   write_apply_conf
   nginx_test_reload
 }
@@ -542,6 +594,7 @@ delete_backend_pick() {
   mv "${NGX_BACKENDS_MAP}.tmp" "$NGX_BACKENDS_MAP"
 
   rebuild_balancer_files
+  ensure_http_conf_maps
   write_apply_conf
   nginx_test_reload
   echo -e "${GRN}✅ Eliminado.${NC}"
@@ -642,7 +695,7 @@ traffic_stats() {
   esac
 }
 
-# ------------------ FIREWALL UFW (Opción 13) ------------------
+# ------------------ FIREWALL UFW (Opción 13 original) ------------------
 ufw_open_port() {
   echo -e "${CYA}Firewall UFW: permitir tráfico por puerto${NC}"
   echo -e "${DIM}Ejemplo: 80/tcp (HTTP) o 443/tcp (HTTPS).${NC}\n"
@@ -686,6 +739,7 @@ restore_bundle() {
   echo -e "${YLW}⚠️ Backup preventivo antes de restaurar...${NC}"
   backup_bundle
   tar -xzf "$file" -C / 2>/dev/null || true
+  ensure_http_conf_maps
   write_apply_conf
   rebuild_balancer_files
   nginx_test_reload
@@ -743,6 +797,10 @@ main() {
   ensure_files
   read_cfg
 
+  # ✅ Asegurar maps/variables dentro de http{} (para que proxy_pass use $nenenet_backend_url)
+  ensure_http_conf_maps
+
+  # ✅ apply.conf sin if/set + balance files
   write_apply_conf >/dev/null 2>&1 || true
   rebuild_balancer_files >/dev/null 2>&1 || true
 
