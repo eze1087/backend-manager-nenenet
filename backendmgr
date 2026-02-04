@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Backend Manager Nenenet 3.0"
-APP_VER="4.5"
+APP_VER="4.6"
 
 # ------------------ RUTAS ------------------
 CFG_DIR="/etc/backendmgr"
@@ -29,7 +29,6 @@ BACKUP_DIR="/etc/nginx/backendmgr-backups"
 
 # Logs
 PANEL_LOG="/var/log/backendmgr.panel.log"
-WRAPPER_LOG="/var/log/backendmgr.wrapper.log"
 
 # ------------------ COLORES ------------------
 NC='\033[0m'
@@ -50,7 +49,7 @@ fi
 
 on_err() {
   local rc=$?
-  echo -e "${RED}❌ ERROR:${NC} backendmgr rc=${rc} | línea ${LINENO} | cmd: ${BASH_COMMAND}" | tee -a "$PANEL_LOG" >/dev/null
+  echo "❌ ERROR: backendmgr rc=${rc} | línea ${LINENO} | cmd: ${BASH_COMMAND}" | tee -a "$PANEL_LOG" >/dev/null
   echo -e "${YLW}📌 Log:${NC} ${PANEL_LOG}"
   exit "$rc"
 }
@@ -98,6 +97,10 @@ JSON
 
 ensure_cfg() {
   [[ -f "$CFG_FILE" ]] || write_default_cfg
+  # Asegurar key balance_max_slots_cap en configs viejos
+  tmp="$(mktemp)"
+  jq '.balance_max_slots_cap = (.balance_max_slots_cap // 64)' "$CFG_FILE" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+  mv "$tmp" "$CFG_FILE"
 }
 
 ensure_files() {
@@ -114,28 +117,35 @@ ensure_files() {
   [[ -f "$NGX_LIMITS_URL" ]] || : > "$NGX_LIMITS_URL"
 }
 
+# ✅ FIX DEFINITIVO: read_cfg robusto (no rompe aunque falten keys)
 read_cfg() {
-  [[ -f "$CFG_FILE" ]] || { echo -e "${RED}Falta ${CFG_FILE}.${NC} Reinstalá con install.sh"; exit 1; }
+  [[ -f "$CFG_FILE" ]] || { echo -e "${RED}Falta ${CFG_FILE}. Reinstalá con install.sh${NC}"; exit 1; }
 
-  HEADER_NAME="$(jq -r '.header_name' "$CFG_FILE")"
-  PRIMARY_DOMAIN="$(jq -r '.primary_domain' "$CFG_FILE")"
+  HEADER_NAME="$(jq -r '.header_name // "Backend"' "$CFG_FILE" 2>/dev/null || echo "Backend")"
+  PRIMARY_DOMAIN="$(jq -r '.primary_domain // ""' "$CFG_FILE" 2>/dev/null || echo "")"
   [[ "$PRIMARY_DOMAIN" == "null" ]] && PRIMARY_DOMAIN=""
 
-  RL_ENABLED="$(jq -r '.rate_limit_enabled' "$CFG_FILE")"
-  RL_RATE="$(jq -r '.rate_limit_rate' "$CFG_FILE")"
-  RL_BURST="$(jq -r '.rate_limit_burst' "$CFG_FILE")"
-  CONN_LIMIT="$(jq -r '.conn_limit' "$CFG_FILE")"
+  RL_ENABLED="$(jq -r '.rate_limit_enabled // true' "$CFG_FILE" 2>/dev/null || echo "true")"
+  RL_RATE="$(jq -r '.rate_limit_rate // "10r/s"' "$CFG_FILE" 2>/dev/null || echo "10r/s")"
+  RL_BURST="$(jq -r '.rate_limit_burst // 20' "$CFG_FILE" 2>/dev/null || echo "20")"
+  CONN_LIMIT="$(jq -r '.conn_limit // 30' "$CFG_FILE" 2>/dev/null || echo "30")"
 
-  CURL_TMO="$(jq -r '.curl_timeout_seconds' "$CFG_FILE")"
-  WINDOW_SEC="$(jq -r '.traffic_window_seconds' "$CFG_FILE")"
-  STATS_LOG="$(jq -r '.stats_log_path' "$CFG_FILE")"
+  CURL_TMO="$(jq -r '.curl_timeout_seconds // 8' "$CFG_FILE" 2>/dev/null || echo "8")"
+  WINDOW_SEC="$(jq -r '.traffic_window_seconds // 60' "$CFG_FILE" 2>/dev/null || echo "60")"
+  STATS_LOG="$(jq -r '.stats_log_path // "/var/log/nginx/backendmgr.stats.log"' "$CFG_FILE" 2>/dev/null || echo "/var/log/nginx/backendmgr.stats.log")"
 
-  BAL_MODE="$(jq -r '.balance_mode' "$CFG_FILE")"
-  BAL_CAP="$(jq -r '.balance_max_slots_cap' "$CFG_FILE")"
-  [[ "$BAL_CAP" == "null" || -z "$BAL_CAP" ]] && BAL_CAP="64"
+  BAL_MODE="$(jq -r '.balance_mode // "off"' "$CFG_FILE" 2>/dev/null || echo "off")"
+
+  BAL_CAP="$(jq -r '.balance_max_slots_cap // 64' "$CFG_FILE" 2>/dev/null || echo 64)"
+  [[ -z "${BAL_CAP:-}" || "$BAL_CAP" == "null" ]] && BAL_CAP="64"
+  [[ "$BAL_CAP" =~ ^[0-9]+$ ]] || BAL_CAP="64"
 }
 
 nginx_test_reload() {
+  if ! command -v nginx >/dev/null 2>&1; then
+    echo -e "${YLW}⚠️ nginx no está instalado.${NC}"
+    return 0
+  fi
   if ! timeout 10s nginx -t; then
     echo -e "${YLW}⚠️ nginx -t falló. No recargo.${NC}"
     return 0
@@ -148,8 +158,8 @@ banner() {
   clear || true
   echo -e "${CYA}╔══════════════════════════════════════════════════════════════╗${NC}"
   echo -e "${CYA}║${NC}  🚀 ${APP_NAME} v${APP_VER}                                     ${CYA}║${NC}"
-  echo -e "${CYA}║${NC}  Dominio madre: ${WHT}${PRIMARY_DOMAIN:-"(no configurado)"}${NC} | Header: ${WHT}${HEADER_NAME}${NC} ${CYA}║${NC}"
-  echo -e "${CYA}║${NC}  Balance: ${WHT}${BAL_MODE}${NC} | Stats: ${WHT}${STATS_LOG}${NC} ${CYA}║${NC}"
+  echo -e "${CYA}║${NC}  Header: ${WHT}${HEADER_NAME}${NC} | Balance: ${WHT}${BAL_MODE}${NC} (cap ${BAL_CAP}) ${CYA}║${NC}"
+  echo -e "${CYA}║${NC}  Stats: ${WHT}${STATS_LOG}${NC}                                 ${CYA}║${NC}"
   echo -e "${CYA}╚══════════════════════════════════════════════════════════════╝${NC}"
   echo
 }
@@ -332,11 +342,10 @@ speed_limit_menu() {
   esac
 }
 
-# ------------------ LISTAS / PICKS ------------------
+# ------------------ PICKS ------------------
 pick_domain() {
   mapfile -t files < <(server_files)
-  [[ "${#files[@]}" -gt 0 ]] || { echo -e "${YLW}No hay dominios madre creados.${NC}"; return 1; }
-
+  [[ "${#files[@]}" -gt 0 ]] || { echo -e "${YLW}No hay dominios creados.${NC}"; return 1; }
   echo -e "${CYA}Elegir dominio madre:${NC}"
   local i=0
   for f in "${files[@]}"; do
@@ -356,8 +365,7 @@ pick_domain() {
 
 pick_backend() {
   mapfile -t lines < <(backend_lines)
-  [[ "${#lines[@]}" -gt 0 ]] || { echo -e "${YLW}No hay backends cargados.${NC}"; return 1; }
-
+  [[ "${#lines[@]}" -gt 0 ]] || { echo -e "${YLW}No hay backends.${NC}"; return 1; }
   echo -e "${CYA}Elegir backend:${NC}"
   local i=0
   for line in "${lines[@]}"; do
@@ -371,21 +379,18 @@ pick_backend() {
   read -r -p "Número: " n
   [[ "$n" =~ ^[0-9]+$ ]] || return 1
   (( n>=1 && n<=${#lines[@]} )) || return 1
-
   line="${lines[$((n-1))]}"
   PICKED_BACKEND="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
   PICKED_BACKEND_URL="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
-  [[ -n "${PICKED_BACKEND:-}" ]] || return 1
   return 0
 }
 
-# ------------------ DOMINIO MADRE / SERVER ------------------
+# ------------------ DOMINIOS / SERVERS ------------------
 create_server_for_domain() {
   local dom="$1"
   local file="${SERVERS_DIR}/${dom}.conf"
   local safe="${dom//./_}"
 
-  # defaults exactos (300/600/600)
   local cto="${2:-300s}"
   local sto="${3:-600s}"
   local rto="${4:-600s}"
@@ -434,7 +439,6 @@ add_domain_auto_create() {
   rebuild_balancer_files
   nginx_test_reload
   echo -e "${GRN}✅ Dominio madre creado:${NC} ${dom} (80)"
-  echo -e "${DIM}Tip: si querés editar timeouts, opción 9.${NC}"
 }
 
 create_or_edit_server_http() {
@@ -545,6 +549,7 @@ delete_backend_pick() {
 
 # ------------------ HEALTHCHECK ------------------
 healthcheck_all() {
+  read_cfg
   echo -e "${CYA}Healthcheck (HTTP y latencia)${NC}"
   echo -e "${DIM}HTTP 000 = no responde • timeout curl: ${CURL_TMO}s${NC}\n"
   printf "%-22s %-18s %-6s %-6s %-10s\n" "BACKEND" "IP" "PORT" "HTTP" "LAT(ms)"
@@ -564,6 +569,7 @@ healthcheck_all() {
 
 # ------------------ VALIDAR CONEXIÓN ------------------
 validate_connection_test() {
+  read_cfg
   echo -e "${CYA}Validar conexión (dominio → backend por header)${NC}\n"
   pick_domain || return 0
   pick_backend || return 0
@@ -592,9 +598,10 @@ validate_connection_test() {
 traffic_stats() {
   read_cfg
   echo -e "${CYA}Tráfico (por IP o Backend)${NC}"
-  echo -e "${DIM}Lee ${STATS_LOG}. Muestra totales por últimas líneas (si está vacío, no hubo tráfico).${NC}\n"
+  echo -e "${DIM}Lee ${STATS_LOG}. Si está vacío, no hubo tráfico aún.${NC}\n"
 
   [[ -f "$STATS_LOG" ]] || { echo -e "${YLW}No existe todavía: ${STATS_LOG}${NC}"; return 0; }
+
   local lines=5000
   read -r -p "Cantidad de líneas a analizar (Enter=${lines}): " in
   lines="${in:-$lines}"
@@ -736,7 +743,6 @@ main() {
   ensure_files
   read_cfg
 
-  # asegurar que existan apply/balance (sin romper)
   write_apply_conf >/dev/null 2>&1 || true
   rebuild_balancer_files >/dev/null 2>&1 || true
 
