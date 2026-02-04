@@ -717,21 +717,21 @@ nginx_services_menu() {
 # ------------------ MENU ------------------
 menu() {
   echo -e "${WHT}📌 MENÚ PRINCIPAL${NC}"
+  echo "  1) 🌐 Agregar dominio madre (AUTO crea server)"
   echo "  2) ➕ Agregar backend (nombre + IP + puerto)"
-  echo "  3) 🌐 Agregar dominio madre (AUTO crea server)"
-  echo "  4) 📄 Listar backends (backend / IP / puerto)"
-  echo "  5) 🌍 Listar dominios madre (servers)"
-  echo "  6) 🗑️  Eliminar backend"
-  echo "  7) ✅ Healthcheck (HTTP y latencia)"
-  echo "  8) 🧪 Validar conexión (dominio → backend por header)"
-  echo "  9) 🧩 Editar timeouts del dominio madre (Enter=default 300/600/600)"
-  echo " 10) ⚖️ Balanceador (OFF/RANDOM/STICKY-IP)"
-  echo " 11) 🚦 Limitar ancho de banda por IP o Backend (limit_rate)"
-  echo " 12) 📊 Tráfico por IP / Backend (stats log)"
-  echo " 13) 🔥 Firewall UFW: abrir puerto (80/443/otro)"
-  echo " 14) 💾 Backup"
-  echo " 15) ♻️  Restaurar backup"
-  echo " 16) ⚙️  Servicios de Nginx (Status/Stop/Start/Reload/Restart)"
+  echo "  3) 📄 Listar backends (backend / IP / puerto)"
+  echo "  4) 🌍 Listar dominios madre (servers)"
+  echo "  5) 🗑️  Eliminar backend"
+  echo "  6) ✅ Healthcheck (HTTP y latencia)"
+  echo "  7) 🧪 Validar conexión (dominio → backend por header)"
+  echo "  8) 🧩 Editar timeouts del dominio madre (Enter=default 300/600/600)"
+  echo "  9) ⚖️ Balanceador (OFF/RANDOM/STICKY-IP)"
+  echo " 10) 🚦 Limitar ancho de banda por IP o Backend (limit_rate)"
+  echo " 11) 📊 Tráfico por IP / Backend (stats log)"
+  echo " 12) 🔥 Firewall UFW: abrir puerto (80/443/otro)"
+  echo " 13) 💾 Backup"
+  echo " 14) ♻️  Restaurar backup"
+  echo " 15) ⚙️  Servicios de Nginx (Status/Stop/Start/Reload/Restart)"
   echo "  0) 🚪 Salir"
   echo
 }
@@ -751,22 +751,23 @@ main() {
     menu
     read -r -p "Opción: " opt
     echo
+
     case "$opt" in
+      1) add_domain_auto_create; pause ;;
       2) add_backend; pause ;;
-      3) add_domain_auto_create; pause ;;
-      4) list_backends; pause ;;
-      5) list_domains; pause ;;
-      6) delete_backend_pick; pause ;;
-      7) healthcheck_all; pause ;;
-      8) validate_connection_test; pause ;;
-      9) create_or_edit_server_http; pause ;;
-      10) set_balance_mode; pause ;;
-      11) speed_limit_menu; pause ;;
-      12) traffic_stats; pause ;;
-      13) ufw_open_port; pause ;;
-      14) backup_bundle; pause ;;
-      15) restore_bundle; pause ;;
-      16) nginx_services_menu; pause ;;
+      3) list_backends; pause ;;
+      4) list_domains; pause ;;
+      5) delete_backend_pick; pause ;;
+      6) healthcheck_all; pause ;;
+      7) validate_connection_test; pause ;;
+      8) create_or_edit_server_http; pause ;;
+      9) set_balance_mode; pause ;;
+     10) speed_limit_menu; pause ;;
+     11) traffic_stats; pause ;;
+     12) ufw_open_port; pause ;;
+     13) backup_bundle; pause ;;
+     14) restore_bundle; pause ;;
+     15) nginx_services_menu; pause ;;
       0) exit 0 ;;
       *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
     esac
