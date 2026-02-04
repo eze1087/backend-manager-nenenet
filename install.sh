@@ -10,12 +10,15 @@ PANEL_BIN_DST="/usr/local/bin/backendmgr"
 
 NGX_DIR="/etc/nginx/conf.d/backendmgr"
 SERVERS_DIR="${NGX_DIR}/servers"
+
 NGX_MAIN_INCLUDE="${NGX_DIR}/backendmgr.conf"
 NGX_BACKENDS_MAP="${NGX_DIR}/backends.map"
 NGX_APPLY_SNIP="${NGX_DIR}/apply.conf"
 NGX_LOGGING_SNIP="${NGX_DIR}/logging.conf"
+
 NGX_BALANCER_CONF="${NGX_DIR}/balancer.conf"
 NGX_BALANCED_MAP="${NGX_DIR}/balanced.map"
+
 NGX_LIMITS_IP="${NGX_DIR}/limits_ip.map"
 NGX_LIMITS_BACKEND="${NGX_DIR}/limits_backend.map"
 NGX_LIMITS_URL="${NGX_DIR}/limits_url.map"
@@ -23,46 +26,16 @@ NGX_LIMITS_URL="${NGX_DIR}/limits_url.map"
 BACKUP_DIR="/etc/nginx/backendmgr-backups"
 
 need_root(){ [[ ${EUID:-999} -eq 0 ]] || { echo "ERROR: ejecutá con sudo."; exit 1; }; }
-backup_file(){ local f="$1"; mkdir -p "$BACKUP_DIR"; [[ -e "$f" ]] && cp -a "$f" "${BACKUP_DIR}/$(basename "$f").bak-$(date +%Y%m%d-%H%M%S)" || true; }
 
-download_panel(){
-  echo "Descargando panel: $REPO_PANEL_URL"
-  curl -fsSL "$REPO_PANEL_URL" -o /tmp/backendmgr || { echo "ERROR: no pude descargar backendmgr"; exit 1; }
-
-  # CRLF -> LF
-  sed -i 's/\r$//' /tmp/backendmgr || true
-
-  # Validación #1: shebang correcto en 1ra línea
-  head -n1 /tmp/backendmgr | grep -q '^#!/usr/bin/env bash' || {
-    echo "ERROR: backendmgr no tiene shebang válido en la primera línea."
-    echo "Solución: subí backendmgr con saltos de línea reales (LF) y shebang en línea 1."
-    exit 1
-  }
-
-  # Validación #2: no viene “aplastado” en una sola línea
-  local lines
-  lines="$(wc -l < /tmp/backendmgr | tr -d ' ')"
-  if [[ "${lines}" -lt 20 ]]; then
-    echo "ERROR: backendmgr parece estar mal subido (muy pocas líneas: ${lines})."
-    echo "Eso pasa cuando el archivo quedó en una sola línea en GitHub."
-    exit 1
-  fi
-
-  # Validación #3: sintaxis bash
-  bash -n /tmp/backendmgr || {
-    echo "ERROR: backendmgr tiene errores de sintaxis."
-    exit 1
-  }
-
-  install -m 0755 /tmp/backendmgr "$PANEL_BIN_DST"
+backup_file(){
+  local f="$1"
+  mkdir -p "$BACKUP_DIR"
+  [[ -e "$f" ]] && cp -a "$f" "${BACKUP_DIR}/$(basename "$f").bak-$(date +%Y%m%d-%H%M%S)" || true
 }
 
-write_base_files(){
-  mkdir -p "$ETC_DIR" "$NGX_DIR" "$SERVERS_DIR" "$BACKUP_DIR" /var/lib/backendmgr /var/log/nginx
-  chmod 700 "$BACKUP_DIR" || true
-
-  if [[ ! -f "$CFG_FILE" ]]; then
-    cat > "$CFG_FILE" <<'JSON'
+write_default_cfg(){
+  mkdir -p "$ETC_DIR"
+  cat > "$CFG_FILE" <<'JSON'
 {
   "nginx_conf": "/etc/nginx/nginx.conf",
   "header_name": "Backend",
@@ -78,18 +51,59 @@ write_base_files(){
   "balance_max_slots_cap": 64
 }
 JSON
-  fi
+}
+
+download_panel(){
+  echo "[3/8] Descargando panel..."
+  curl -fsSL "$REPO_PANEL_URL" -o /tmp/backendmgr || {
+    echo "ERROR: no pude descargar backendmgr desde: $REPO_PANEL_URL"
+    exit 1
+  }
+  sed -i 's/\r$//' /tmp/backendmgr || true
+
+  head -n1 /tmp/backendmgr | grep -q '^#!/' || sed -i '1i#!/usr/bin/env bash' /tmp/backendmgr
+
+  # validar sintaxis
+  bash -n /tmp/backendmgr || { echo "ERROR: backendmgr tiene errores de sintaxis"; exit 1; }
+
+  install -m 0755 /tmp/backendmgr "$PANEL_BIN_DST"
+}
+
+write_base_files(){
+  mkdir -p "$ETC_DIR" "$NGX_DIR" "$SERVERS_DIR" "$BACKUP_DIR" /var/lib/backendmgr /var/log/nginx
+  chmod 700 "$BACKUP_DIR" || true
+
+  [[ -f "$CFG_FILE" ]] || write_default_cfg
 
   [[ -f "$NGX_BACKENDS_MAP" ]] || : > "$NGX_BACKENDS_MAP"
   [[ -f "$NGX_APPLY_SNIP" ]] || : > "$NGX_APPLY_SNIP"
   [[ -f "$NGX_BALANCER_CONF" ]] || : > "$NGX_BALANCER_CONF"
   [[ -f "$NGX_BALANCED_MAP" ]] || : > "$NGX_BALANCED_MAP"
+
   [[ -f "$NGX_LIMITS_IP" ]] || : > "$NGX_LIMITS_IP"
   [[ -f "$NGX_LIMITS_BACKEND" ]] || : > "$NGX_LIMITS_BACKEND"
   [[ -f "$NGX_LIMITS_URL" ]] || : > "$NGX_LIMITS_URL"
 
   cat > "$NGX_LOGGING_SNIP" <<'EOF'
 log_format backendmgr_stats '$time_local|$remote_addr|$host|$http_backend|$upstream_addr|$status|$body_bytes_sent|$request_time|$upstream_response_time|$request';
+EOF
+
+  # apply.conf base (panel lo reescribe)
+  cat > "$NGX_APPLY_SNIP" <<'EOF'
+# Backend Manager Nenenet 3.0 apply.conf
+access_log /var/log/nginx/backendmgr.stats.log backendmgr_stats;
+EOF
+
+  # balancer.conf base (OFF)
+  cat > "$NGX_BALANCER_CONF" <<'EOF'
+# backendmgr balancer.conf (balance OFF)
+map $host $backendmgr_balance { default 0; }
+map $host $backendmgr_slot { default "0"; }
+
+map $backendmgr_slot $balanced_backend_url {
+    default $backend_url;
+    include /etc/nginx/conf.d/backendmgr/balanced.map;
+}
 EOF
 
   cat > "$NGX_MAIN_INCLUDE" <<EOF
@@ -112,9 +126,8 @@ ensure_nginx_conf_no_break(){
   local nginx_conf="/etc/nginx/nginx.conf"
   backup_file "$nginx_conf"
 
-  # Si ya tenés tu map backend_url, NO lo tocamos (para respetar tu conexión)
+  # si ya tiene tu map, no lo tocamos (solo insertamos include si falta)
   if [[ -f "$nginx_conf" ]] && grep -q 'map\s\+\$http_backend\s\+\$backend_url' "$nginx_conf"; then
-    # Solo insertamos include si falta
     if ! grep -q '/etc/nginx/conf.d/backendmgr/backendmgr.conf' "$nginx_conf"; then
       awk '
         BEGIN{ins=0}
@@ -129,7 +142,7 @@ ensure_nginx_conf_no_break(){
     return 0
   fi
 
-  # Si no existe o no está en formato, generamos uno compatible con tu modelo
+  # si no existe o no está en formato, generamos uno compatible con tu modelo
   cat > "$nginx_conf" <<EOF
 worker_processes auto;
 pid /run/nginx.pid;
@@ -149,67 +162,110 @@ EOF
 }
 
 install_wrapper_nginx(){
-  mkdir -p "$BACKUP_DIR"
-  local SBIN="/usr/sbin/nginx"
-  local SBIN_REAL="/usr/sbin/nginx.real"
+  echo "[6/8] Wrapper nginx (nginx abre menú)..."
 
-  if [[ -x "$SBIN" && ! -e "$SBIN_REAL" ]]; then
+  local SBIN="/usr/sbin/nginx"
+  local REAL="/usr/sbin/nginx.real"
+
+  # preservar nginx real
+  if [[ -x "$SBIN" && ! -x "$REAL" ]]; then
     cp -a "$SBIN" "${BACKUP_DIR}/nginx.sbin.bak-$(date +%Y%m%d-%H%M%S)" || true
-    mv "$SBIN" "$SBIN_REAL"
+    mv "$SBIN" "$REAL"
   fi
 
-  cat > "$SBIN" <<'EOF'
+  cat > "$SBIN" <<'WRAP'
 #!/usr/bin/env bash
 set -euo pipefail
 
 PANEL="/usr/local/bin/backendmgr"
 REAL="/usr/sbin/nginx.real"
+LOG="/var/log/backendmgr.wrapper.log"
+
+log() {
+  mkdir -p /var/log 2>/dev/null || true
+  printf "[%s] %s\n" "$(date +%F\ %T)" "$*" >>"$LOG" 2>/dev/null || true
+}
+
+run_panel() {
+  log "RUN_PANEL user=$(id -u) tty=$(tty 2>/dev/null || echo none) cwd=$(pwd)"
+
+  if [[ ! -x "$PANEL" ]]; then
+    echo "ERROR: no existe o no es ejecutable: $PANEL" >/dev/tty 2>/dev/null || true
+    log "ERROR panel no executable"
+    return 127
+  fi
+
+  # CLAVE: no morir por set -e si el panel devuelve rc!=0
+  set +e
+  if [[ -r /dev/tty && -w /dev/tty ]]; then
+    </dev/tty >/dev/tty 2>&1 "$PANEL"
+    rc=$?
+  else
+    "$PANEL"
+    rc=$?
+  fi
+  set -e
+
+  log "PANEL_EXIT rc=$rc"
+
+  if [[ -r /dev/tty && -w /dev/tty ]]; then
+    echo "" >/dev/tty
+    echo "⚠️ El panel terminó (rc=$rc). Log: $LOG" >/dev/tty
+    read -r -p "Enter para volver..." _ </dev/tty || true
+  fi
+
+  return "$rc"
+}
 
 if [[ $# -eq 0 ]]; then
-  exec "$PANEL"
+  run_panel
+  exit $?
 fi
 
 case "${1:-}" in
-  menu|panel|nenenet) exec "$PANEL" ;;
+  menu|panel|nenenet)
+    run_panel
+    exit $?
+  ;;
 esac
 
 if [[ ! -x "$REAL" ]]; then
   REAL="/usr/sbin/nginx"
 fi
 exec "$REAL" "$@"
-EOF
+WRAP
 
   chmod +x "$SBIN"
-  ln -sf /usr/sbin/nginx /usr/local/bin/nginx || true
+  ln -sf /usr/sbin/nginx /usr/local/bin/nginx 2>/dev/null || true
+  ln -sf /usr/sbin/nginx /usr/bin/nginx 2>/dev/null || true
+
+  bash -n /usr/sbin/nginx
 }
 
 main(){
   need_root
-  echo "[1/7] Dependencias..."
+  echo "[1/8] Dependencias..."
   export DEBIAN_FRONTEND=noninteractive
   apt update -y
   apt install -y nginx curl jq gawk sed grep coreutils iproute2 net-tools nano ufw
 
-  echo "[2/7] Base..."
+  echo "[2/8] Archivos base..."
   write_base_files
 
-  echo "[3/7] Panel..."
   download_panel
 
-  echo "[4/7] nginx.conf (sin romper tu config)..."
+  echo "[4/8] nginx.conf (sin romper tu config)..."
   ensure_nginx_conf_no_break
 
-  echo "[5/7] Wrapper nginx..."
-  install_wrapper_nginx
-
-  echo "[6/7] Validando Nginx..."
+  echo "[5/8] Validando Nginx..."
   nginx -t
 
-  echo "[7/7] Reload..."
+  install_wrapper_nginx
+
+  echo "[7/8] Reload..."
   nginx -s reload >/dev/null 2>&1 || true
 
-  echo
-  echo "✅ Listo. Abrir panel con: nginx  (o sudo nginx)"
+  echo "[8/8] ✅ Listo. Abrir panel con: nginx  (o sudo nginx)"
 }
 
 main
