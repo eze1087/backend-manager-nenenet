@@ -1,15 +1,67 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# fuerza TTY si existe (evita que read falle y el panel se cierre)
-if [[ -r /dev/tty ]]; then
+# ===================== INIT SAFE (NO QUITA FUNCIONES) =====================
+
+# Forzar TTY (evita "vuelve al prompt" sin mostrar menú)
+if [[ -r /dev/tty && -w /dev/tty ]]; then
   exec </dev/tty >/dev/tty 2>&1
 fi
 
+CFG_FILE="/etc/backendmgr/config.json"
+
+ensure_root_or_exit() {
+  if [[ ${EUID:-999} -ne 0 ]]; then
+    echo "ERROR: ejecutá el panel como root: sudo nginx"
+    exit 1
+  fi
+}
+
+ensure_jq_or_hint() {
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "ERROR: falta 'jq'. Instalalo con: apt install -y jq"
+    echo
+    read -r -p "¿Instalar jq ahora? (Y/n): " ans || true
+    ans="${ans:-Y}"
+    if [[ "$ans" =~ ^[Yy]$ ]]; then
+      export DEBIAN_FRONTEND=noninteractive
+      apt update -y && apt install -y jq
+    else
+      exit 1
+    fi
+  fi
+}
+
+ensure_cfg_or_create() {
+  if [[ ! -f "$CFG_FILE" ]]; then
+    mkdir -p /etc/backendmgr
+    cat > "$CFG_FILE" <<'JSON'
+{
+  "nginx_conf": "/etc/nginx/nginx.conf",
+  "header_name": "Backend",
+  "primary_domain": "",
+  "rate_limit_enabled": true,
+  "rate_limit_rate": "10r/s",
+  "rate_limit_burst": 20,
+  "conn_limit": 30,
+  "curl_timeout_seconds": 8,
+  "traffic_window_seconds": 60,
+  "stats_log_path": "/var/log/nginx/backendmgr.stats.log",
+  "balance_mode": "off",
+  "balance_max_slots_cap": 64
+}
+JSON
+  fi
+}
+
+ensure_root_or_exit
+ensure_jq_or_hint
+ensure_cfg_or_create
+
+# ===================== TU PANEL (IGUAL QUE ANTES) =====================
+
 APP_NAME="Backend Manager Nenenet 3.0"
 APP_VER="4.4"
-
-CFG_FILE="/etc/backendmgr/config.json"
 
 NGX_DIR="/etc/nginx/conf.d/backendmgr"
 SERVERS_DIR="${NGX_DIR}/servers"
