@@ -541,8 +541,11 @@ add_backend() {
   local url="http://${ip}:${port}"
 
   if grep -qE "^\s*\"${key}\"" "$NGX_BACKENDS_MAP"; then
-    awk -v k="$key" -v url="$url" '{re="^[ \t]*\""k"\""; if($0~re){sub(/\"http:\\/\\/[^\\\"]+\"/, "\""url"\"")} print}' \
-      "$NGX_BACKENDS_MAP" > "${NGX_BACKENDS_MAP}.tmp" && mv "${NGX_BACKENDS_MAP}.tmp" "$NGX_BACKENDS_MAP"
+    awk -v k="$key" -v url="$url" '
+      { re="^[ \t]*\""k"\"";
+        if($0~re){ sub(/\"http:\\/\\/[^\\\"]+\"/, "\""url"\"") }
+        print
+      }' "$NGX_BACKENDS_MAP" > "${NGX_BACKENDS_MAP}.tmp" && mv "${NGX_BACKENDS_MAP}.tmp" "$NGX_BACKENDS_MAP"
     echo -e "${GRN}✅ Actualizado:${NC} $key -> $ip:$port"
   else
     printf "        \"%s\" \"%s\";\n" "$key" "$url" >> "$NGX_BACKENDS_MAP"
@@ -553,6 +556,8 @@ add_backend() {
   ensure_http_conf_maps
   write_apply_conf
   nginx_test_reload
+
+  return 0
 }
 
 list_backends() {
@@ -560,6 +565,7 @@ list_backends() {
   printf "%-4s %-22s %-18s %-6s\n" "#" "BACKEND" "IP" "PORT"
   echo "--------------------------------------------------------------"
   local i=0
+
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     i=$((i+1))
@@ -568,7 +574,12 @@ list_backends() {
     ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
     printf "%-4s %-22s %-18s %-6s\n" "$i" "$key" "$ip" "$port"
   done < <(backend_lines)
-  [[ "$i" -eq 0 ]] && echo -e "${YLW}No hay backends cargados.${NC}"
+
+  if [[ "$i" -eq 0 ]]; then
+    echo -e "${YLW}No hay backends cargados.${NC}"
+  fi
+
+  return 0
 }
 
 delete_backend_pick() {
@@ -585,6 +596,7 @@ delete_backend_pick() {
     printf "%-3s) %-22s -> %s:%s\n" "$i" "$key" "$ip" "$port"
   done
 
+  echo
   read -r -p "Número: " n
   [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${RED}Inválido.${NC}"; return 0; }
   (( n>=1 && n<=${#lines[@]} )) || { echo -e "${RED}Fuera de rango.${NC}"; return 0; }
@@ -597,7 +609,9 @@ delete_backend_pick() {
   ensure_http_conf_maps
   write_apply_conf
   nginx_test_reload
+
   echo -e "${GRN}✅ Eliminado.${NC}"
+  return 0
 }
 
 # ------------------ HEALTHCHECK ------------------
