@@ -74,13 +74,11 @@ write_snippets(){
 log_format backendmgr_stats '$time_local|$remote_addr|$host|$http_backend|$upstream_addr|$status|$body_bytes_sent|$request_time|$upstream_response_time|$request';
 EOF
 
-  # apply.conf base (panel lo reescribe completo igual)
   cat > "$NGX_APPLY_SNIP" <<'EOF'
 # Backend Manager Nenenet 3.0 apply.conf
 access_log /var/log/nginx/backendmgr.stats.log backendmgr_stats;
 EOF
 
-  # balancer.conf base OFF
   cat > "$NGX_BALANCER_CONF" <<'EOF'
 # backendmgr balancer.conf (balance OFF)
 map $host $backendmgr_balance { default 0; }
@@ -92,7 +90,6 @@ map $backendmgr_slot $balanced_backend_url {
 }
 EOF
 
-  # backendmgr.conf: maps + servers
   cat > "$NGX_MAIN_INCLUDE" <<EOF
 include ${NGX_LOGGING_SNIP};
 
@@ -115,19 +112,24 @@ EOF
 
 download_panel(){
   echo "[3/9] Descargando panel..."
-  curl -fsSL "$PANEL_URL" -o /tmp/backendmgr || { echo "ERROR: no pude bajar backendmgr."; exit 1; }
+  curl -fsSL "$PANEL_URL" -o /tmp/backendmgr || { echo "ERROR: no pude bajar backendmgr (URL 404 o sin permisos)."; exit 1; }
   sed -i 's/\r$//' /tmp/backendmgr || true
   bash -n /tmp/backendmgr || { echo "ERROR: backendmgr tiene errores de sintaxis."; exit 1; }
   install -m 0755 /tmp/backendmgr "$PANEL_DST"
+}
+
+ensure_cfg_keys(){
+  # asegurar key balance_max_slots_cap aunque el config sea viejo
+  tmp="$(mktemp)"
+  jq '.balance_max_slots_cap = (.balance_max_slots_cap // 64)' "$CFG_FILE" > "$tmp" && mv "$tmp" "$CFG_FILE"
 }
 
 ensure_nginx_conf_include(){
   local nginx_conf="/etc/nginx/nginx.conf"
   backup_file "$nginx_conf"
 
-  # Si ya tiene map $http_backend $backend_url, NO lo tocamos.
+  # Si ya tiene el map como tu config, NO lo tocamos (solo include).
   if grep -q 'map\s\+\$http_backend\s\+\$backend_url' "$nginx_conf"; then
-    # Solo agregamos include dentro de http{} si falta
     if ! grep -q '/etc/nginx/conf.d/backendmgr/backendmgr.conf' "$nginx_conf"; then
       awk '
         BEGIN{ins=0}
@@ -142,7 +144,7 @@ ensure_nginx_conf_include(){
     return 0
   fi
 
-  # Si no existe el map (instalación limpia), armamos uno compatible con tu modelo.
+  # Instalación limpia: crear nginx.conf base compatible
   cat > "$nginx_conf" <<EOF
 worker_processes auto;
 pid /run/nginx.pid;
@@ -162,11 +164,10 @@ EOF
 }
 
 install_wrapper_nginx(){
-  echo "[7/9] Wrapper nginx..."
+  echo "[6/8] Wrapper nginx (nginx abre menú)..."
   local SBIN="/usr/sbin/nginx"
   local REAL="/usr/sbin/nginx.real"
 
-  # mover binario real una vez
   if [[ -x "$SBIN" && ! -x "$REAL" ]]; then
     cp -a "$SBIN" "${BACKUP_DIR}/nginx.sbin.bak-$(date +%Y%m%d-%H%M%S)" || true
     mv "$SBIN" "$REAL"
@@ -244,30 +245,29 @@ main(){
   need_root
   export DEBIAN_FRONTEND=noninteractive
 
-  echo "[1/9] Dependencias..."
+  echo "[1/8] Dependencias..."
   apt-get update -y
   apt-get install -y nginx curl jq gawk sed grep coreutils iproute2 net-tools ufw
 
-  echo "[2/9] Directorios..."
+  echo "[2/8] Archivos base..."
   make_dirs
+  ensure_cfg_keys
 
   download_panel
 
-  echo "[4/9] Snippets..."
+  echo "[4/8] Snippets..."
   write_snippets
 
-  echo "[5/9] nginx.conf include..."
+  echo "[5/8] nginx.conf include..."
   ensure_nginx_conf_include
 
-  echo "[6/9] Validando Nginx..."
+  echo "[7/8] Reload..."
   nginx -t
+  nginx -s reload >/dev/null 2>&1 || true
 
   install_wrapper_nginx
 
-  echo "[8/9] Reload..."
-  nginx -s reload >/dev/null 2>&1 || true
-
-  echo "[9/9] ✅ Listo. Abrir panel con: nginx  (o sudo nginx)"
+  echo "[8/8] ✅ Listo. Abrir panel con: nginx  (o sudo nginx)"
 }
 
 main
