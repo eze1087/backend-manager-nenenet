@@ -876,7 +876,7 @@ nginx_services_menu() {
 }
 
 speedtest_install_if_needed() {
-  # Prioridad: paquete "speedtest-cli" (python) porque es simple y suele estar en apt.
+  # Si ya existe, listo
   if command -v speedtest >/dev/null 2>&1; then
     return 0
   fi
@@ -888,6 +888,7 @@ speedtest_install_if_needed() {
   apt-get update -y >/dev/null 2>&1 || true
   apt-get install -y speedtest-cli >/dev/null 2>&1 || true
 
+  # Verificar de nuevo
   if command -v speedtest >/dev/null 2>&1; then
     echo -e "${GRN}✅ Speedtest instalado (speedtest-cli).${NC}"
     return 0
@@ -971,6 +972,7 @@ main() {
      13) backup_bundle; pause ;;
      14) restore_bundle; pause ;;
      15) nginx_services_menu; pause ;;
+     16) speedtest_menu; pause ;;
       0) exit 0 ;;
       *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
     esac
