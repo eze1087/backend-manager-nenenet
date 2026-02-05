@@ -875,6 +875,46 @@ nginx_services_menu() {
   return 0
 }
 
+speedtest_install_if_needed() {
+  # Prioridad: paquete "speedtest-cli" (python) porque es simple y suele estar en apt.
+  if command -v speedtest >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo -e "${YLW}⚠️ Speedtest no está instalado.${NC}"
+  echo -e "${DIM}Intento instalar speedtest-cli (apt).${NC}"
+
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y >/dev/null 2>&1 || true
+  apt-get install -y speedtest-cli >/dev/null 2>&1 || true
+
+  if command -v speedtest >/dev/null 2>&1; then
+    echo -e "${GRN}✅ Speedtest instalado (speedtest-cli).${NC}"
+    return 0
+  fi
+
+  echo -e "${RED}ERROR:${NC} No pude instalar speedtest-cli."
+  echo -e "${DIM}Probá manualmente:${NC} apt-get update && apt-get install -y speedtest-cli"
+  return 0
+}
+
+speedtest_menu() {
+  echo -e "${CYA}Speedtest del servidor (Ping / Bajada / Subida)${NC}"
+  echo -e "${DIM}Usa speedtest-cli. Puede tardar 20–60s según red.${NC}\n"
+
+  speedtest_install_if_needed
+
+  if ! command -v speedtest >/dev/null 2>&1; then
+    echo -e "${YLW}No se pudo ejecutar speedtest porque no está instalado.${NC}"
+    return 0
+  fi
+
+  echo -e "${DIM}Ejecutando...${NC}\n"
+  speedtest --simple || true
+
+  return 0
+}
+
 # ------------------ MENU ------------------
 menu() {
   echo -e "${WHT}📌 MENÚ PRINCIPAL${NC}"
@@ -893,6 +933,7 @@ menu() {
   echo " 13) 💾 Backup"
   echo " 14) ♻️  Restaurar backup"
   echo " 15) ⚙️  Servicios de Nginx (Status/Stop/Start/Reload/Restart)"
+  echo " 16) 🚀 Speedtest (Ping / Bajada / Subida)"
   echo "  0) 🚪 Salir"
   echo
 }
