@@ -338,81 +338,242 @@ limit_rate $nenenet_rate;
 EOF
 }
 
-# ------------------ BALANCE ------------------
-rebuild_balancer_files() {
-  read_cfg
-  local cap="$BAL_CAP"
-  [[ "$cap" =~ ^[0-9]+$ ]] || cap=64
+# ------------------ MOTHERS BALANCE (por dominio madre) ------------------
 
-  : > "$NGX_BALANCED_MAP"
-  local i=0
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    local url
-    url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
-    printf "    \"%s\" \"%s\";\n" "$i" "$url" >> "$NGX_BALANCED_MAP"
-    i=$((i+1))
-    [[ $i -ge $cap ]] && break
-  done < <(backend_lines)
+mother_safe() { echo "$1" | sed 's/[^A-Za-z0-9_]/_/g'; }
+mother_list_file() { echo "${NGX_MOTHERS_DIR}/$1.list"; }
+mother_mode_file() { echo "${NGX_MOTHERS_DIR}/$1.mode"; }
+mother_upstream_name() { echo "backendmgr_mothers_$(mother_safe "$1")"; }
+target_file() { echo "${NGX_TARGETS_DIR}/$1.conf"; }
 
-  if [[ $i -lt 2 || "$BAL_MODE" == "off" ]]; then
-    cat > "$NGX_BALANCER_CONF" <<'EOF'
-# backendmgr balancer.conf (balance OFF)
-map $host $backendmgr_balance { default 0; }
-map $host $backendmgr_slot { default "0"; }
-
-map $backendmgr_slot $balanced_backend_url {
-    default $backend_url;
-    include /etc/nginx/conf.d/backendmgr/balanced.map;
-}
+ensure_domain_target_exists() {
+  local dom="$1"
+  mkdir -p "$NGX_TARGETS_DIR"
+  # target default = directo a backend (tu modo original)
+  if [[ ! -f "$(target_file "$dom")" ]]; then
+    cat > "$(target_file "$dom")" <<EOF
+# target default: backend directo (por header -> map)
+proxy_pass \$nenenet_backend_url;
 EOF
+  fi
+}
+
+mothers_enable_for_domain() {
+  local dom="$1"
+  ensure_domain_target_exists "$dom"
+  local up; up="$(mother_upstream_name "$dom")"
+
+  cat > "$(target_file "$dom")" <<EOF
+# target: balanceo entre madres (upstream)
+proxy_pass http://${up};
+EOF
+}
+
+mothers_disable_for_domain() {
+  local dom="$1"
+  ensure_domain_target_exists "$dom"
+
+  cat > "$(target_file "$dom")" <<EOF
+# target: backend directo (por header -> map)
+proxy_pass \$nenenet_backend_url;
+EOF
+}
+
+rebuild_mothers_upstreams() {
+  : > "$NGX_MOTHERS_UPSTREAMS"
+  echo "# ${APP_NAME} mothers upstreams (http{})" >> "$NGX_MOTHERS_UPSTREAMS"
+
+  local f dom mode up
+  for f in "${NGX_MOTHERS_DIR}"/*.list; do
+    [[ -f "$f" ]] || continue
+    dom="$(basename "$f" .list)"
+    up="$(mother_upstream_name "$dom")"
+
+    mode="round_robin"
+    [[ -f "$(mother_mode_file "$dom")" ]] && mode="$(cat "$(mother_mode_file "$dom")" 2>/dev/null || echo round_robin)"
+
+    echo "" >> "$NGX_MOTHERS_UPSTREAMS"
+    echo "upstream ${up} {" >> "$NGX_MOTHERS_UPSTREAMS"
+
+    case "$mode" in
+      least_conn) echo "    least_conn;" >> "$NGX_MOTHERS_UPSTREAMS" ;;
+      ip_hash)    echo "    ip_hash;" >> "$NGX_MOTHERS_UPSTREAMS" ;;
+      failover)   : ;; # sin directiva: usamos 'backup' en el 2do server si corresponde
+      round_robin|*) : ;;
+    esac
+
+    # servers: cada línea es: IP:PORT [backup]
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      # permitido: "1.2.3.4:80" o "1.2.3.4:80 backup"
+      if echo "$line" | grep -qE '^[0-9.]+:[0-9]+( +backup)?$'; then
+        echo "    server ${line} max_fails=3 fail_timeout=5s;" >> "$NGX_MOTHERS_UPSTREAMS"
+      fi
+    done < "$f"
+
+    # keepalive mejora performance
+    echo "    keepalive 64;" >> "$NGX_MOTHERS_UPSTREAMS"
+    echo "}" >> "$NGX_MOTHERS_UPSTREAMS"
+  done
+
+  ensure_http_conf_maps
+  nginx_test_reload
+}
+
+ensure_http_conf_maps() {
+  # IMPORTANTE: tu backendmgr.conf está en http{}
+  # Aseguramos incluir upstreams de mothers
+  [[ -f "$NGX_MAIN_INCLUDE" ]] || return 0
+
+  if ! grep -qF "$NGX_MOTHERS_UPSTREAMS" "$NGX_MAIN_INCLUDE" 2>/dev/null; then
+    # insertamos include mothers upstreams si no existe
+    # (lo agregamos al final para no romper orden)
+    echo "" >> "$NGX_MAIN_INCLUDE"
+    echo "include ${NGX_MOTHERS_UPSTREAMS};" >> "$NGX_MAIN_INCLUDE"
+  fi
+}
+
+mothers_list() {
+  local dom="$1"
+  local lf; lf="$(mother_list_file "$dom")"
+  [[ -f "$lf" ]] || { echo -e "${YLW}No hay madres cargadas para ${dom}.${NC}"; return 0; }
+
+  echo -e "${CYA}Madres para:${NC} ${dom}"
+  nl -w2 -s') ' "$lf" 2>/dev/null || true
+}
+
+mothers_add() {
+  pick_domain_for_manage || return 0
+  local dom="$PICKED_DOMAIN"
+  local lf; lf="$(mother_list_file "$dom")"
+  mkdir -p "$NGX_MOTHERS_DIR"
+  [[ -f "$lf" ]] || : > "$lf"
+
+  echo -e "${CYA}Agregar madre al pool de:${NC} ${dom}"
+  echo -e "${DIM}Formato: IP y puerto (ej 10.0.0.2 : 80).${NC}\n"
+  read -r -p "IP de la madre: " ip
+  validate_ip "$ip" || { echo -e "${RED}IP inválida.${NC}"; return 0; }
+  read -r -p "Puerto (ej 80): " port
+  [[ "$port" =~ ^[0-9]{2,5}$ ]] || { echo -e "${RED}Puerto inválido.${NC}"; return 0; }
+
+  local entry="${ip}:${port}"
+
+  if grep -qxF "$entry" "$lf" 2>/dev/null; then
+    echo -e "${YLW}Ya existe:${NC} $entry"
     return 0
   fi
 
-  local base=$((100 / i))
-  local rem=$((100 - base * i))
-
-  local split_key='$remote_addr'
-  [[ "$BAL_MODE" == "random" ]] && split_key='$remote_addr$msec$connection'
-
-  {
-    echo "# backendmgr balancer.conf (balance: ${BAL_MODE})"
-    echo "map \$host \$backendmgr_balance { default 1; }"
-    echo "split_clients \"${split_key}\" \$backendmgr_slot {"
-    for ((n=0;n<i;n++)); do
-      local pct="$base"
-      if (( rem > 0 )); then pct=$((pct+1)); rem=$((rem-1)); fi
-      echo "    ${pct}% \"${n}\";"
-    done
-    echo "}"
-    echo "map \$backendmgr_slot \$balanced_backend_url {"
-    echo "    default \$backend_url;"
-    echo "    include ${NGX_BALANCED_MAP};"
-    echo "}"
-  } > "$NGX_BALANCER_CONF"
+  echo "$entry" >> "$lf"
+  rebuild_mothers_upstreams
+  echo -e "${GRN}✅ Madre agregada:${NC} $entry"
 }
 
-set_balance_mode() {
-  echo -e "${CYA}Balanceador (equilibrar tráfico)${NC}"
-  echo -e "${DIM}OFF = tu modo (por header). RANDOM = reparte. STICKY-IP = por IP.${NC}\n"
-  echo "1) OFF"
-  echo "2) RANDOM"
-  echo "3) STICKY-IP"
+mothers_remove() {
+  pick_domain_for_manage || return 0
+  local dom="$PICKED_DOMAIN"
+  local lf; lf="$(mother_list_file "$dom")"
+  [[ -f "$lf" ]] || { echo -e "${YLW}No hay madres para ${dom}.${NC}"; return 0; }
+
+  echo -e "${CYA}Quitar madre de:${NC} ${dom}\n"
+  nl -w2 -s') ' "$lf"
+  echo
+  read -r -p "Número: " n
+  [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${RED}Inválido.${NC}"; return 0; }
+
+  local line
+  line="$(sed -n "${n}p" "$lf" 2>/dev/null || true)"
+  [[ -n "$line" ]] || { echo -e "${RED}Fuera de rango.${NC}"; return 0; }
+
+  awk -v rm="$line" '$0!=rm{print}' "$lf" > "${lf}.tmp" && mv "${lf}.tmp" "$lf"
+  rebuild_mothers_upstreams
+  echo -e "${GRN}✅ Madre eliminada:${NC} $line"
+}
+
+mothers_set_mode() {
+  pick_domain_for_manage || return 0
+  local dom="$PICKED_DOMAIN"
+  mkdir -p "$NGX_MOTHERS_DIR"
+
+  echo -e "${CYA}Modo de balance entre madres para:${NC} ${dom}"
+  echo "1) round_robin (reparte)"
+  echo "2) least_conn (menos conexiones)"
+  echo "3) ip_hash (sticky por IP)"
+  echo "4) failover (primario/secundario)"
   read -r -p "Opción: " op
+
+  local mode="round_robin"
   case "$op" in
-    1) new="off" ;;
-    2) new="random" ;;
-    3) new="iphash" ;;
-    *) echo "Inválida"; return 0 ;;
+    1) mode="round_robin" ;;
+    2) mode="least_conn" ;;
+    3) mode="ip_hash" ;;
+    4) mode="failover" ;;
+    *) echo -e "${YLW}Inválido.${NC}"; return 0 ;;
   esac
 
-  jq --arg v "$new" '.balance_mode=$v' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
-  read_cfg
-  rebuild_balancer_files
-  ensure_http_conf_maps
-  write_apply_conf
-  nginx_test_reload
-  echo -e "${GRN}✅ Balance: ${new}${NC}"
+  echo "$mode" > "$(mother_mode_file "$dom")"
+
+  # Si es failover, marcamos como backup el 2do (y siguientes) automáticamente
+  local lf; lf="$(mother_list_file "$dom")"
+  [[ -f "$lf" ]] || : > "$lf"
+
+  if [[ "$mode" == "failover" ]]; then
+    awk 'NR==1{print $0; next} {print $0 " backup"}' "$lf" | sed 's/ backup backup$/ backup/' > "${lf}.tmp" && mv "${lf}.tmp" "$lf"
+  else
+    # quitamos "backup" si existía
+    sed 's/ *backup$//' "$lf" > "${lf}.tmp" && mv "${lf}.tmp" "$lf"
+  fi
+
+  rebuild_mothers_upstreams
+  echo -e "${GRN}✅ Modo guardado:${NC} $mode"
+}
+
+mothers_enable_disable() {
+  pick_domain_for_manage || return 0
+  local dom="$PICKED_DOMAIN"
+  ensure_domain_target_exists "$dom"
+
+  echo -e "${CYA}Balanceo entre madres para:${NC} ${dom}\n"
+  echo "1) Activar (proxy_pass -> upstream mothers)"
+  echo "2) Desactivar (proxy_pass -> backend directo por header)"
+  read -r -p "Opción: " op
+
+  case "$op" in
+    1)
+      mothers_enable_for_domain "$dom"
+      rebuild_mothers_upstreams
+      nginx_test_reload
+      echo -e "${GRN}✅ Activado.${NC}"
+      ;;
+    2)
+      mothers_disable_for_domain "$dom"
+      nginx_test_reload
+      echo -e "${GRN}✅ Desactivado.${NC}"
+      ;;
+    *) echo -e "${YLW}Inválido.${NC}" ;;
+  esac
+}
+
+mothers_menu() {
+  echo -e "${CYA}⚖️ Balanceo de Madres (Pool por dominio)${NC}"
+  echo -e "${DIM}Reparte requests entre SERVIDORES MADRE (VPS) que tienen el mismo map backend→IP.${NC}\n"
+  echo "1) Ver madres de un dominio"
+  echo "2) Agregar madre a un dominio"
+  echo "3) Quitar madre de un dominio"
+  echo "4) Elegir modo (round_robin / least_conn / ip_hash / failover)"
+  echo "5) Activar / Desactivar balanceo por dominio"
+  echo "0) Volver"
+  echo
+  read -r -p "Opción: " op
+  echo
+  case "$op" in
+    1) pick_domain_for_manage && mothers_list "$PICKED_DOMAIN" ;;
+    2) mothers_add ;;
+    3) mothers_remove ;;
+    4) mothers_set_mode ;;
+    5) mothers_enable_disable ;;
+    0) return 0 ;;
+    *) echo -e "${YLW}Opción inválida.${NC}" ;;
+  esac
   return 0
 }
 
@@ -1019,7 +1180,7 @@ menu() {
   echo "  6) ✅ Healthcheck (HTTP y latencia)"
   echo "  7) 🧪 Validar conexión (dominio → backend por header)"
   echo "  8) 🧩 Editar timeouts del dominio madre (manual por nombre)"
-  echo "  9) ⚖️ Balanceador (OFF/RANDOM/STICKY-IP)"
+  echo "  9) ⚖️ Balanceo de MADRES (VPS pool por dominio)"
   echo " 10) 🚦 Limitar ancho de banda por IP o Backend (limit_rate)"
   echo " 11) 📊 Tráfico por IP / Backend (stats log)"
   echo " 12) 🔥 Firewall UFW: abrir puerto (80/443/otro)"
@@ -1057,7 +1218,7 @@ main() {
       6) healthcheck_all; pause ;;
       7) validate_connection_test; pause ;;
       8) create_or_edit_server_http; pause ;;
-      9) set_balance_mode; pause ;;
+      9) mothers_menu; pause ;;
      10) speed_limit_menu; pause ;;
      11) traffic_stats; pause ;;
      12) ufw_open_port; pause ;;
