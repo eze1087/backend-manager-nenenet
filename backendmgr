@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Backend Manager Nenenet 3.0"
-APP_VER="4.8"
+APP_VER="4.83"
 
 # ------------------ RUTAS ------------------
 CFG_DIR="/etc/backendmgr"
@@ -15,9 +15,16 @@ NGX_BACKENDS_MAP="${NGX_DIR}/backends.map"
 NGX_APPLY_SNIP="${NGX_DIR}/apply.conf"
 NGX_MAIN_INCLUDE="${NGX_DIR}/backendmgr.conf"
 
-# Balance
+# Balance (viejo: se deja OFF para no romper compatibilidad)
 NGX_BALANCER_CONF="${NGX_DIR}/balancer.conf"
 NGX_BALANCED_MAP="${NGX_DIR}/balanced.map"
+
+# Mothers (nuevo balance por dominio madre / pool VPS)
+NGX_MOTHERS_DIR="${NGX_DIR}/mothers"
+NGX_MOTHERS_UPSTREAMS="${NGX_DIR}/mothers_upstreams.conf"
+
+# Targets (proxy_pass por dominio)
+NGX_TARGETS_DIR="${NGX_DIR}/targets"
 
 # Speed limits
 NGX_LIMITS_IP="${NGX_DIR}/limits_ip.map"
@@ -108,7 +115,10 @@ ensure_cfg() {
 }
 
 ensure_files() {
-  mkdir -p "$NGX_DIR" "$SERVERS_DIR" "$BACKUP_DIR" /var/log/nginx /var/lib/backendmgr
+  mkdir -p \
+    "$NGX_DIR" "$SERVERS_DIR" \
+    "$NGX_MOTHERS_DIR" "$NGX_TARGETS_DIR" \
+    "$BACKUP_DIR" /var/log/nginx /var/lib/backendmgr
   chmod 700 "$BACKUP_DIR" || true
 
   [[ -f "$NGX_BACKENDS_MAP" ]] || : > "$NGX_BACKENDS_MAP"
@@ -119,6 +129,8 @@ ensure_files() {
   [[ -f "$NGX_LIMITS_IP" ]] || : > "$NGX_LIMITS_IP"
   [[ -f "$NGX_LIMITS_BACKEND" ]] || : > "$NGX_LIMITS_BACKEND"
   [[ -f "$NGX_LIMITS_URL" ]] || : > "$NGX_LIMITS_URL"
+
+  [[ -f "$NGX_MOTHERS_UPSTREAMS" ]] || : > "$NGX_MOTHERS_UPSTREAMS"
 
   [[ -f "$NGX_LOGGING_SNIP" ]] || cat > "$NGX_LOGGING_SNIP" <<'EOF'
 log_format backendmgr_stats '$time_local|$remote_addr|$host|$http_backend|$upstream_addr|$status|$body_bytes_sent|$request_time|$upstream_response_time|$request';
@@ -147,40 +159,27 @@ read_cfg() {
   [[ -z "${BAL_CAP:-}" || "$BAL_CAP" == "null" ]] && BAL_CAP="64"
   [[ "$BAL_CAP" =~ ^[0-9]+$ ]] || BAL_CAP="64"
 }
+
 # ---------- Helpers banner ----------
 nginx_state() {
   if command -v systemctl >/dev/null 2>&1; then
-    if systemctl is-active --quiet nginx; then
-      echo "ON"
-    else
-      echo "OFF"
-    fi
+    if systemctl is-active --quiet nginx; then echo "ON"; else echo "OFF"; fi
   else
-    if pidof nginx >/dev/null 2>&1; then
-      echo "ON"
-    else
-      echo "OFF"
-    fi
+    if pidof nginx >/dev/null 2>&1; then echo "ON"; else echo "OFF"; fi
   fi
 }
 
-backend_count() {
-  # cuenta líneas válidas del map
-  backend_lines | wc -l | tr -d ' '
-}
+backend_lines() { grep -E '^\s*"[A-Za-z0-9_.:-]+"\s+"http://' "$NGX_BACKENDS_MAP" 2>/dev/null || true; }
+server_files() { ls -1 "${SERVERS_DIR}"/*.conf 2>/dev/null || true; }
 
-domain_count() {
-  server_files | wc -l | tr -d ' '
-}
+backend_count() { backend_lines | wc -l | tr -d ' '; }
+domain_count() { server_files | wc -l | tr -d ' '; }
 
 primary_domain_active() {
-  # preferimos PRIMARY_DOMAIN si está configurado
   if [[ -n "${PRIMARY_DOMAIN:-}" && "${PRIMARY_DOMAIN}" != "null" ]]; then
-    echo "$PRIMARY_DOMAIN"
-    return 0
+    echo "$PRIMARY_DOMAIN"; return 0
   fi
 
-  # si no, mostramos el primer dominio de la lista (si existe)
   local f dom
   f="$(server_files | head -n1 || true)"
   if [[ -n "$f" && -f "$f" ]]; then
@@ -192,24 +191,19 @@ primary_domain_active() {
 }
 
 last_backup_info() {
-  # último backup (si existe)
   local file
   file="$(ls -1t "${BACKUP_DIR}"/bundle-*.tar.gz 2>/dev/null | head -n1 || true)"
   if [[ -z "$file" ]]; then
-    echo "NO"
-    return 0
+    echo "NO"; return 0
   fi
 
   local dt
-  # intenta parsear de nombre: bundle-YYYYMMDD-HHMMSS.tar.gz
   dt="$(basename "$file" | sed -nE 's/^bundle-([0-9]{8})-([0-9]{6})\.tar\.gz$/\1 \2/p')"
   if [[ -n "$dt" ]]; then
-    # formateo simple: 20260205 153000 -> 2026-02-05 15:30:00
     local d t
     d="${dt%% *}"; t="${dt##* }"
     echo "SI (${d:0:4}-${d:4:2}-${d:6:2} ${t:0:2}:${t:2:2}:${t:4:2})"
   else
-    # fallback: mtime del archivo
     echo "SI ($(date -r "$file" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "fecha desconocida"))"
   fi
 }
@@ -219,7 +213,6 @@ box_line() {
   local w="${1:-62}"
   shift || true
   local text="$*"
-  # recorta si se pasa (para no romper el cuadro)
   if [[ ${#text} -gt $w ]]; then
     text="${text:0:$w}"
   fi
@@ -239,37 +232,66 @@ nginx_test_reload() {
   return 0
 }
 
+# ✅ Banner con ancho automático (para que el recuadro “quede bien” siempre)
 banner() {
   clear || true
   read_cfg 2>/dev/null || true
 
-  local W=62
   local ng_state dom_active bcount dcount bkp
-
   ng_state="$(nginx_state)"
   dom_active="$(primary_domain_active)"
   bcount="$(backend_count)"
   dcount="$(domain_count)"
   bkp="$(last_backup_info)"
 
+  local l1 l2 l3 l4 l5 l6
+  l1="🚀 ${APP_NAME} v${APP_VER}"
+  l2="Nginx: ${ng_state} | Dominios: ${dcount} | Backends: ${bcount}"
+  l3="Dominio madre activo: ${dom_active}"
+  l4="Header: ${HEADER_NAME} | Balance: ${BAL_MODE} (cap ${BAL_CAP})"
+  l5="Stats: ${STATS_LOG}"
+  l6="Backup: ${bkp}"
+
+  local W=62
+  local n
+  for n in "${#l1}" "${#l2}" "${#l3}" "${#l4}" "${#l5}" "${#l6}"; do
+    (( n > W )) && W="$n"
+  done
+  (( W < 62 )) && W=62
+  (( W > 90 )) && W=90
+
   echo -e "${CYA}╔$(printf '═%.0s' $(seq 1 $((W+2))))╗${NC}"
-  box_line "$W" "🚀 ${APP_NAME} v${APP_VER}"
-  box_line "$W" "Nginx: ${ng_state} | Dominios: ${dcount} | Backends: ${bcount}"
-  box_line "$W" "Dominio madre activo: ${dom_active}"
-  box_line "$W" "Header: ${HEADER_NAME} | Balance: ${BAL_MODE} (cap ${BAL_CAP})"
-  box_line "$W" "Stats: ${STATS_LOG}"
-  box_line "$W" "Backup: ${bkp}"
+  box_line "$W" "$l1"
+  box_line "$W" "$l2"
+  box_line "$W" "$l3"
+  box_line "$W" "$l4"
+  box_line "$W" "$l5"
+  box_line "$W" "$l6"
   echo -e "${CYA}╚$(printf '═%.0s' $(seq 1 $((W+2))))╝${NC}"
   echo
 }
-
-backend_lines() { grep -E '^\s*"[A-Za-z0-9_.:-]+"\s+"http://' "$NGX_BACKENDS_MAP" 2>/dev/null || true; }
-server_files() { ls -1 "${SERVERS_DIR}"/*.conf 2>/dev/null || true; }
 
 validate_domain() { [[ "$1" =~ ^[A-Za-z0-9.-]{3,253}$ ]]; }
 validate_key() { [[ "$1" =~ ^[A-Za-z0-9_.:-]{2,64}$ ]]; }
 validate_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 validate_rate() { [[ "$1" == "0" || "$1" =~ ^[0-9]+[kKmM]$ ]]; }
+
+# ------------------ BALANCER LEGACY (se deja OFF) ------------------
+# (Solo para que no falle nada que lo llame; tu balance real está en "mothers_menu")
+rebuild_balancer_files() {
+  cat > "$NGX_BALANCER_CONF" <<'EOF'
+# backendmgr balancer.conf (legacy balance OFF)
+map $host $backendmgr_balance { default 0; }
+map $host $backendmgr_slot { default "0"; }
+
+map $backendmgr_slot $balanced_backend_url {
+    default $backend_url;
+    include /etc/nginx/conf.d/backendmgr/balanced.map;
+}
+EOF
+  : > "$NGX_BALANCED_MAP" 2>/dev/null || true
+  return 0
+}
 
 # ------------------ http{} include (nenenet_backend_url + nenenet_rate) ------------------
 ensure_http_conf_maps() {
@@ -339,7 +361,6 @@ EOF
 }
 
 # ------------------ MOTHERS BALANCE (por dominio madre) ------------------
-
 mother_safe() { echo "$1" | sed 's/[^A-Za-z0-9_]/_/g'; }
 mother_list_file() { echo "${NGX_MOTHERS_DIR}/$1.list"; }
 mother_mode_file() { echo "${NGX_MOTHERS_DIR}/$1.mode"; }
@@ -349,7 +370,6 @@ target_file() { echo "${NGX_TARGETS_DIR}/$1.conf"; }
 ensure_domain_target_exists() {
   local dom="$1"
   mkdir -p "$NGX_TARGETS_DIR"
-  # target default = directo a backend (tu modo original)
   if [[ ! -f "$(target_file "$dom")" ]]; then
     cat > "$(target_file "$dom")" <<EOF
 # target default: backend directo (por header -> map)
@@ -372,7 +392,6 @@ EOF
 mothers_disable_for_domain() {
   local dom="$1"
   ensure_domain_target_exists "$dom"
-
   cat > "$(target_file "$dom")" <<EOF
 # target: backend directo (por header -> map)
 proxy_pass \$nenenet_backend_url;
@@ -398,36 +417,29 @@ rebuild_mothers_upstreams() {
     case "$mode" in
       least_conn) echo "    least_conn;" >> "$NGX_MOTHERS_UPSTREAMS" ;;
       ip_hash)    echo "    ip_hash;" >> "$NGX_MOTHERS_UPSTREAMS" ;;
-      failover)   : ;; # sin directiva: usamos 'backup' en el 2do server si corresponde
+      failover)   : ;;
       round_robin|*) : ;;
     esac
 
-    # servers: cada línea es: IP:PORT [backup]
     while IFS= read -r line; do
       [[ -z "$line" ]] && continue
-      # permitido: "1.2.3.4:80" o "1.2.3.4:80 backup"
       if echo "$line" | grep -qE '^[0-9.]+:[0-9]+( +backup)?$'; then
         echo "    server ${line} max_fails=3 fail_timeout=5s;" >> "$NGX_MOTHERS_UPSTREAMS"
       fi
     done < "$f"
 
-    # keepalive mejora performance
     echo "    keepalive 64;" >> "$NGX_MOTHERS_UPSTREAMS"
     echo "}" >> "$NGX_MOTHERS_UPSTREAMS"
   done
 
-  ensure_http_conf_maps
+  ensure_mothers_include
   nginx_test_reload
 }
 
-ensure_http_conf_maps() {
-  # IMPORTANTE: tu backendmgr.conf está en http{}
-  # Aseguramos incluir upstreams de mothers
+# ✅ Solo agrega el include de mothers upstreams (sin pisar backendmgr.conf)
+ensure_mothers_include() {
   [[ -f "$NGX_MAIN_INCLUDE" ]] || return 0
-
   if ! grep -qF "$NGX_MOTHERS_UPSTREAMS" "$NGX_MAIN_INCLUDE" 2>/dev/null; then
-    # insertamos include mothers upstreams si no existe
-    # (lo agregamos al final para no romper orden)
     echo "" >> "$NGX_MAIN_INCLUDE"
     echo "include ${NGX_MOTHERS_UPSTREAMS};" >> "$NGX_MAIN_INCLUDE"
   fi
@@ -512,14 +524,12 @@ mothers_set_mode() {
 
   echo "$mode" > "$(mother_mode_file "$dom")"
 
-  # Si es failover, marcamos como backup el 2do (y siguientes) automáticamente
   local lf; lf="$(mother_list_file "$dom")"
   [[ -f "$lf" ]] || : > "$lf"
 
   if [[ "$mode" == "failover" ]]; then
     awk 'NR==1{print $0; next} {print $0 " backup"}' "$lf" | sed 's/ backup backup$/ backup/' > "${lf}.tmp" && mv "${lf}.tmp" "$lf"
   else
-    # quitamos "backup" si existía
     sed 's/ *backup$//' "$lf" > "${lf}.tmp" && mv "${lf}.tmp" "$lf"
   fi
 
@@ -731,8 +741,10 @@ add_domain_auto_create() {
 
   create_server_for_domain "$dom" "300s" "600s" "600s"
   ensure_http_conf_maps
+  ensure_mothers_include
   write_apply_conf
   rebuild_balancer_files
+  ensure_domain_target_exists "$dom"
   nginx_test_reload
   echo -e "${GRN}✅ Dominio madre creado:${NC} ${dom} (80)"
   return 0
@@ -752,8 +764,10 @@ create_or_edit_server_http() {
 
   create_server_for_domain "$dom" "$cto" "$sto" "$rto"
   ensure_http_conf_maps
+  ensure_mothers_include
   write_apply_conf
   rebuild_balancer_files
+  ensure_domain_target_exists "$dom"
   nginx_test_reload
   echo -e "${GRN}✅ Actualizado:${NC} ${dom}"
   return 0
@@ -773,7 +787,7 @@ list_domains() {
   return 0
 }
 
-# ---- NUEVO: gestión de dominios madre (editar/eliminar) ----
+# ---- gestión de dominios madre (editar/eliminar) ----
 pick_domain_for_manage() {
   mapfile -t files < <(server_files)
   [[ "${#files[@]}" -gt 0 ]] || { echo -e "${YLW}No hay dominios madre creados.${NC}"; return 1; }
@@ -810,8 +824,10 @@ edit_domain_pick() {
   create_server_for_domain "$PICKED_DOMAIN" "$cto" "$sto" "$rto"
 
   ensure_http_conf_maps
+  ensure_mothers_include
   write_apply_conf
   rebuild_balancer_files
+  ensure_domain_target_exists "$PICKED_DOMAIN"
   nginx_test_reload
 
   echo -e "${GRN}✅ Dominio actualizado:${NC} ${PICKED_DOMAIN}"
@@ -832,8 +848,13 @@ delete_domain_pick() {
   esac
 
   rm -f "$PICKED_DOMAIN_FILE" || true
+  rm -f "$(target_file "$PICKED_DOMAIN")" 2>/dev/null || true
+  rm -f "$(mother_list_file "$PICKED_DOMAIN")" 2>/dev/null || true
+  rm -f "$(mother_mode_file "$PICKED_DOMAIN")" 2>/dev/null || true
 
+  rebuild_mothers_upstreams || true
   ensure_http_conf_maps
+  ensure_mothers_include
   write_apply_conf
   rebuild_balancer_files
   nginx_test_reload
@@ -894,6 +915,7 @@ add_backend() {
 
   rebuild_balancer_files
   ensure_http_conf_maps
+  ensure_mothers_include
   write_apply_conf
   nginx_test_reload
   return 0
@@ -946,6 +968,7 @@ delete_backend_pick() {
 
   rebuild_balancer_files
   ensure_http_conf_maps
+  ensure_mothers_include
   write_apply_conf
   nginx_test_reload
   echo -e "${GRN}✅ Eliminado.${NC}"
@@ -1098,8 +1121,10 @@ restore_bundle() {
   backup_bundle
   tar -xzf "$file" -C / 2>/dev/null || true
   ensure_http_conf_maps
+  ensure_mothers_include
   write_apply_conf
   rebuild_balancer_files
+  rebuild_mothers_upstreams || true
   nginx_test_reload
   echo -e "${GRN}✅ Restaurado.${NC}"
   return 0
@@ -1129,7 +1154,6 @@ nginx_services_menu() {
 }
 
 speedtest_install_if_needed() {
-  # Si ya existe, listo
   if command -v speedtest >/dev/null 2>&1; then
     return 0
   fi
@@ -1141,7 +1165,6 @@ speedtest_install_if_needed() {
   apt-get update -y >/dev/null 2>&1 || true
   apt-get install -y speedtest-cli >/dev/null 2>&1 || true
 
-  # Verificar de nuevo
   if command -v speedtest >/dev/null 2>&1; then
     echo -e "${GRN}✅ Speedtest instalado (speedtest-cli).${NC}"
     return 0
@@ -1165,7 +1188,6 @@ speedtest_menu() {
 
   echo -e "${DIM}Ejecutando...${NC}\n"
   speedtest --simple || true
-
   return 0
 }
 
@@ -1200,8 +1222,10 @@ main() {
   read_cfg
 
   ensure_http_conf_maps
+  ensure_mothers_include
   write_apply_conf >/dev/null 2>&1 || true
   rebuild_balancer_files >/dev/null 2>&1 || true
+  rebuild_mothers_upstreams >/dev/null 2>&1 || true
 
   while true; do
     banner
