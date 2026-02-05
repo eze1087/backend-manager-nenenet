@@ -147,6 +147,84 @@ read_cfg() {
   [[ -z "${BAL_CAP:-}" || "$BAL_CAP" == "null" ]] && BAL_CAP="64"
   [[ "$BAL_CAP" =~ ^[0-9]+$ ]] || BAL_CAP="64"
 }
+# ---------- Helpers banner ----------
+nginx_state() {
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet nginx; then
+      echo "ON"
+    else
+      echo "OFF"
+    fi
+  else
+    if pidof nginx >/dev/null 2>&1; then
+      echo "ON"
+    else
+      echo "OFF"
+    fi
+  fi
+}
+
+backend_count() {
+  # cuenta líneas válidas del map
+  backend_lines | wc -l | tr -d ' '
+}
+
+domain_count() {
+  server_files | wc -l | tr -d ' '
+}
+
+primary_domain_active() {
+  # preferimos PRIMARY_DOMAIN si está configurado
+  if [[ -n "${PRIMARY_DOMAIN:-}" && "${PRIMARY_DOMAIN}" != "null" ]]; then
+    echo "$PRIMARY_DOMAIN"
+    return 0
+  fi
+
+  # si no, mostramos el primer dominio de la lista (si existe)
+  local f dom
+  f="$(server_files | head -n1 || true)"
+  if [[ -n "$f" && -f "$f" ]]; then
+    dom="$(grep -E '^\s*server_name\s+' "$f" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
+    [[ -n "${dom:-}" ]] && { echo "$dom"; return 0; }
+  fi
+
+  echo "(no configurado)"
+}
+
+last_backup_info() {
+  # último backup (si existe)
+  local file
+  file="$(ls -1t "${BACKUP_DIR}"/bundle-*.tar.gz 2>/dev/null | head -n1 || true)"
+  if [[ -z "$file" ]]; then
+    echo "NO"
+    return 0
+  fi
+
+  local dt
+  # intenta parsear de nombre: bundle-YYYYMMDD-HHMMSS.tar.gz
+  dt="$(basename "$file" | sed -nE 's/^bundle-([0-9]{8})-([0-9]{6})\.tar\.gz$/\1 \2/p')"
+  if [[ -n "$dt" ]]; then
+    # formateo simple: 20260205 153000 -> 2026-02-05 15:30:00
+    local d t
+    d="${dt%% *}"; t="${dt##* }"
+    echo "SI (${d:0:4}-${d:4:2}-${d:6:2} ${t:0:2}:${t:2:2}:${t:4:2})"
+  else
+    # fallback: mtime del archivo
+    echo "SI ($(date -r "$file" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "fecha desconocida"))"
+  fi
+}
+
+# imprime una línea dentro del recuadro con ancho fijo, sin que se rompa
+box_line() {
+  local w="${1:-62}"
+  shift || true
+  local text="$*"
+  # recorta si se pasa (para no romper el cuadro)
+  if [[ ${#text} -gt $w ]]; then
+    text="${text:0:$w}"
+  fi
+  printf "║ %-*s ║\n" "$w" "$text"
+}
 
 nginx_test_reload() {
   if ! command -v nginx >/dev/null 2>&1; then
@@ -163,11 +241,25 @@ nginx_test_reload() {
 
 banner() {
   clear || true
-  echo -e "${CYA}╔══════════════════════════════════════════════════════════════╗${NC}"
-  echo -e "${CYA}║${NC}  🚀 ${APP_NAME} v${APP_VER}                                     ${CYA}║${NC}"
-  echo -e "${CYA}║${NC}  Header: ${WHT}${HEADER_NAME}${NC} | Balance: ${WHT}${BAL_MODE}${NC} (cap ${BAL_CAP}) ${CYA}║${NC}"
-  echo -e "${CYA}║${NC}  Stats: ${WHT}${STATS_LOG}${NC}                                 ${CYA}║${NC}"
-  echo -e "${CYA}╚══════════════════════════════════════════════════════════════╝${NC}"
+  read_cfg 2>/dev/null || true
+
+  local W=62
+  local ng_state dom_active bcount dcount bkp
+
+  ng_state="$(nginx_state)"
+  dom_active="$(primary_domain_active)"
+  bcount="$(backend_count)"
+  dcount="$(domain_count)"
+  bkp="$(last_backup_info)"
+
+  echo -e "${CYA}╔$(printf '═%.0s' $(seq 1 $((W+2))))╗${NC}"
+  box_line "$W" "🚀 ${APP_NAME} v${APP_VER}"
+  box_line "$W" "Nginx: ${ng_state} | Dominios: ${dcount} | Backends: ${bcount}"
+  box_line "$W" "Dominio madre activo: ${dom_active}"
+  box_line "$W" "Header: ${HEADER_NAME} | Balance: ${BAL_MODE} (cap ${BAL_CAP})"
+  box_line "$W" "Stats: ${STATS_LOG}"
+  box_line "$W" "Backup: ${bkp}"
+  echo -e "${CYA}╚$(printf '═%.0s' $(seq 1 $((W+2))))╝${NC}"
   echo
 }
 
