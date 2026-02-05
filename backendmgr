@@ -706,7 +706,7 @@ server {
     proxy_read_timeout    ${rto};
 
     location / {
-        proxy_pass \$nenenet_backend_url;
+        include /etc/nginx/conf.d/backendmgr/targets/${dom}.conf;
 
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
