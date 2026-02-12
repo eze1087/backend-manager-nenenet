@@ -103,6 +103,10 @@ write_default_cfg() {
   "traffic_stats_enabled": true,
   "traffic_stats_since": "",
 
+  "traffic_scan_enabled": false,
+  "traffic_scan_mode": "backend",
+  "traffic_scan_interval": "1min",
+
   "balance_mode": "off",
   "balance_max_slots_cap": 64
 }
@@ -119,6 +123,9 @@ ensure_cfg() {
     .balance_max_slots_cap = (.balance_max_slots_cap // 64)
     | .traffic_stats_enabled = (.traffic_stats_enabled // true)
     | .traffic_stats_since = (.traffic_stats_since // "")
+    | .traffic_scan_enabled = (.traffic_scan_enabled // false)
+    | .traffic_scan_mode = (.traffic_scan_mode // "backend")
+    | .traffic_scan_interval = (.traffic_scan_interval // "1min")
   ' "$CFG_FILE" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
 
   mv "$tmp" "$CFG_FILE"
@@ -163,10 +170,17 @@ read_cfg() {
   WINDOW_SEC="$(jq -r '.traffic_window_seconds // 60' "$CFG_FILE" 2>/dev/null || echo "60")"
   STATS_LOG="$(jq -r '.stats_log_path // "/var/log/nginx/backendmgr.stats.log"' "$CFG_FILE" 2>/dev/null || echo "/var/log/nginx/backendmgr.stats.log")"
 
-  # ✅ NUEVO (para opción 11)
+  # ✅ Opción 11: logging
   TRAFFIC_STATS_ENABLED="$(jq -r '.traffic_stats_enabled // true' "$CFG_FILE" 2>/dev/null || echo "true")"
   TRAFFIC_STATS_SINCE="$(jq -r '.traffic_stats_since // ""' "$CFG_FILE" 2>/dev/null || echo "")"
   [[ "$TRAFFIC_STATS_SINCE" == "null" ]] && TRAFFIC_STATS_SINCE=""
+
+  # ✅ Opción 11: escaneo permanente (scanner)
+  TRAFFIC_SCAN_ENABLED="$(jq -r '.traffic_scan_enabled // false' "$CFG_FILE" 2>/dev/null || echo "false")"
+  TRAFFIC_SCAN_MODE="$(jq -r '.traffic_scan_mode // "backend"' "$CFG_FILE" 2>/dev/null || echo "backend")"
+  TRAFFIC_SCAN_INTERVAL="$(jq -r '.traffic_scan_interval // "1min"' "$CFG_FILE" 2>/dev/null || echo "1min")"
+  [[ "$TRAFFIC_SCAN_MODE" == "null" || -z "$TRAFFIC_SCAN_MODE" ]] && TRAFFIC_SCAN_MODE="backend"
+  [[ "$TRAFFIC_SCAN_INTERVAL" == "null" || -z "$TRAFFIC_SCAN_INTERVAL" ]] && TRAFFIC_SCAN_INTERVAL="1min"
 
   BAL_MODE="$(jq -r '.balance_mode // "off"' "$CFG_FILE" 2>/dev/null || echo "off")"
 
@@ -354,7 +368,7 @@ write_apply_conf() {
 # ${APP_NAME} apply.conf
 EOF
 
-  # ✅ NUEVO: activar/desactivar logging de tráfico (opción 11)
+  # ✅ activar/desactivar logging de tráfico (opción 11)
   if [[ "${TRAFFIC_STATS_ENABLED}" == "true" ]]; then
     cat >> "$NGX_APPLY_SNIP" <<EOF
 access_log ${STATS_LOG} backendmgr_stats;
@@ -388,7 +402,7 @@ limit_rate $nenenet_rate;
 EOF
 }
 
-# ✅ NUEVO: toggles para opción 11 (sin tocar tus otras opciones)
+# ✅ toggles para logging (opción 11)
 set_traffic_stats_enabled() {
   local new="$1" # true/false
   local since=""
@@ -404,6 +418,331 @@ set_traffic_stats_enabled() {
   read_cfg
   write_apply_conf
   nginx_test_reload
+  return 0
+}
+
+# ------------------ TRÁFICO: ESCANEO PERMANENTE (scanner) ------------------
+have_systemd() { command -v systemctl >/dev/null 2>&1; }
+
+systemd_write_unit() {
+  local path="$1"
+  local content="$2"
+  echo "$content" > "$path"
+}
+
+systemd_reload_daemon() {
+  have_systemd || return 0
+  systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+systemd_enable_start_timer() {
+  local t="$1"
+  have_systemd || return 0
+  systemctl enable --now "$t" >/dev/null 2>&1 || true
+}
+
+systemd_disable_stop_timer() {
+  local t="$1"
+  have_systemd || return 0
+  systemctl disable --now "$t" >/dev/null 2>&1 || true
+}
+
+traffic_scan_paths() {
+  echo "/var/lib/backendmgr/traffic_scan.state /var/lib/backendmgr/traffic_totals_ip.db /var/lib/backendmgr/traffic_totals_backend.db"
+}
+
+traffic_scan_write_helper() {
+  # Helper que corre desde systemd, incremental por offset
+  local helper="/usr/local/sbin/backendmgr-traffic-scan.sh"
+  cat > "$helper" <<'BASH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+CFG_FILE="/etc/backendmgr/config.json"
+STATE="/var/lib/backendmgr/traffic_scan.state"
+DB_IP="/var/lib/backendmgr/traffic_totals_ip.db"
+DB_BE="/var/lib/backendmgr/traffic_totals_backend.db"
+
+jqv() { jq -r "$1" "$CFG_FILE" 2>/dev/null || true; }
+
+STATS_LOG="$(jqv '.stats_log_path // "/var/log/nginx/backendmgr.stats.log"')"
+MODE="$(jqv '.traffic_scan_mode // "backend"')"
+EN="$(jqv '.traffic_scan_enabled // false')"
+
+[[ "$EN" == "true" ]] || exit 0
+[[ -f "$STATS_LOG" ]] || exit 0
+
+mkdir -p /var/lib/backendmgr
+
+# Estado: inode size offset
+inode_now="$(stat -c '%i' "$STATS_LOG" 2>/dev/null || echo 0)"
+size_now="$(stat -c '%s' "$STATS_LOG" 2>/dev/null || echo 0)"
+
+inode_old="0"; offset_old="0"; size_old="0"
+if [[ -f "$STATE" ]]; then
+  # shellcheck disable=SC1090
+  source "$STATE" 2>/dev/null || true
+  inode_old="${inode:-0}"
+  offset_old="${offset:-0}"
+  size_old="${size:-0}"
+fi
+
+# log rotado o truncado -> reseteamos
+if [[ "$inode_now" != "$inode_old" ]] || (( size_now < offset_old )); then
+  offset_old=0
+fi
+
+# no hay nuevas
+if (( size_now <= offset_old )); then
+  exit 0
+fi
+
+# leer solo lo nuevo (bytes)
+# tail -c +N empieza en N (1-index)
+start=$((offset_old + 1))
+
+# Elegir DB según modo
+DB="$DB_BE"
+KEYFIELD=4
+if [[ "$MODE" == "ip" ]]; then
+  DB="$DB_IP"
+  KEYFIELD=2
+fi
+
+# Asegurar DB existe
+[[ -f "$DB" ]] || : > "$DB"
+
+# Procesar incremental:
+# - Primero cargar DB existente (key bytes req)
+# - Luego sumar nuevas líneas del log
+# - Guardar DB actualizado
+tmp="${DB}.tmp.$$"
+
+# Nota: log format:
+# time|remote_addr|host|http_backend|upstream_addr|status|body_bytes_sent|...
+tail -c +"$start" "$STATS_LOG" 2>/dev/null | awk -F'|' -v keyf="$KEYFIELD" '
+  BEGIN { OFS="\t" }
+  # cargar DB existente desde stdin? (no: lo cargamos aparte)
+  { }
+' >/dev/null 2>&1 || true
+
+# awk de verdad (dos pasadas: DB + nuevas líneas)
+tail -c +"$start" "$STATS_LOG" 2>/dev/null | awk -F'|' -v keyf="$KEYFIELD" -v DBFILE="$DB" '
+  BEGIN { OFS="\t" }
+  FNR==NR {
+    # DB: key \t bytes \t req
+    if($1!=""){
+      k=$1; b[k]+=$2; r[k]+=$3
+    }
+    next
+  }
+  {
+    k=$keyf
+    if(k=="") k="(vacío)"
+    bytes=$7
+    if(bytes=="") bytes=0
+    # bytes viene numérico
+    r[k]+=1
+    b[k]+=bytes
+  }
+  END{
+    for(k in b){
+      print k, b[k], r[k]
+    }
+  }
+' "$DB" - | sort -k2,2nr > "$tmp" || true
+
+mv "$tmp" "$DB"
+
+# guardar estado nuevo
+cat > "$STATE" <<EOF
+inode=${inode_now}
+size=${size_now}
+offset=${size_now}
+EOF
+
+exit 0
+BASH
+  chmod 755 "$helper" || true
+}
+
+traffic_scan_write_units() {
+  local every="$1" # systemd interval: 30s | 1min | 10min | 2h etc.
+
+  traffic_scan_write_helper
+
+  systemd_write_unit "/etc/systemd/system/backendmgr-traffic-scan.service" \
+"[Unit]
+Description=BackendMgr Traffic Scan (incremental stats)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/backendmgr-traffic-scan.sh
+"
+
+  systemd_write_unit "/etc/systemd/system/backendmgr-traffic-scan.timer" \
+"[Unit]
+Description=BackendMgr Traffic Scan timer
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=${every}
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"
+}
+
+set_traffic_scan_cfg() {
+  local en="$1" mode="$2" interval="$3"
+
+  jq \
+    --argjson en "$en" \
+    --arg mode "$mode" \
+    --arg interval "$interval" \
+    '
+      .traffic_scan_enabled = $en
+      | .traffic_scan_mode = $mode
+      | .traffic_scan_interval = $interval
+    ' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
+
+  read_cfg
+  return 0
+}
+
+traffic_scan_enable() {
+  local mode="$1" interval="$2"
+
+  if ! have_systemd; then
+    echo -e "${YLW}⚠️ No hay systemd/systemctl. No puedo dejarlo permanente en este sistema.${NC}"
+    return 0
+  fi
+
+  # limpiar estado si se cambia modo (para que arranque prolijo)
+  rm -f /var/lib/backendmgr/traffic_scan.state 2>/dev/null || true
+
+  set_traffic_scan_cfg true "$mode" "$interval"
+
+  traffic_scan_write_units "$interval"
+  systemd_reload_daemon
+  systemd_enable_start_timer "backendmgr-traffic-scan.timer"
+
+  # disparar una vez ahora
+  /usr/local/sbin/backendmgr-traffic-scan.sh >/dev/null 2>&1 || true
+
+  echo -e "${GRN}✅ Escaneo permanente ACTIVADO:${NC} modo=${mode} intervalo=${interval}"
+  return 0
+}
+
+traffic_scan_disable() {
+  if ! have_systemd; then
+    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    return 0
+  fi
+
+  set_traffic_scan_cfg false "$TRAFFIC_SCAN_MODE" "$TRAFFIC_SCAN_INTERVAL"
+
+  systemd_disable_stop_timer "backendmgr-traffic-scan.timer"
+  rm -f /etc/systemd/system/backendmgr-traffic-scan.timer /etc/systemd/system/backendmgr-traffic-scan.service 2>/dev/null || true
+  systemd_reload_daemon
+
+  echo -e "${GRN}✅ Escaneo permanente DESACTIVADO.${NC}"
+  return 0
+}
+
+traffic_scan_status() {
+  read_cfg
+  echo -e "${CYA}Estado escaneo permanente (scanner)${NC}"
+  echo "  Enabled : ${TRAFFIC_SCAN_ENABLED}"
+  echo "  Mode    : ${TRAFFIC_SCAN_MODE}"
+  echo "  Interval: ${TRAFFIC_SCAN_INTERVAL}"
+  echo "  DB ip    : /var/lib/backendmgr/traffic_totals_ip.db"
+  echo "  DB be    : /var/lib/backendmgr/traffic_totals_backend.db"
+  echo "  State    : /var/lib/backendmgr/traffic_scan.state"
+  echo
+  if have_systemd; then
+    systemctl status backendmgr-traffic-scan.timer --no-pager 2>/dev/null || true
+    echo
+    systemctl list-timers --all | grep -E 'backendmgr-traffic-scan' || true
+  else
+    echo -e "${YLW}No hay systemd/systemctl.${NC}"
+  fi
+  return 0
+}
+
+traffic_show_from_db() {
+  local mode="$1" # ip|backend
+  local db="/var/lib/backendmgr/traffic_totals_backend.db"
+  local title="BACKEND"
+  local w1="22"
+
+  if [[ "$mode" == "ip" ]]; then
+    db="/var/lib/backendmgr/traffic_totals_ip.db"
+    title="IP"
+    w1="18"
+  fi
+
+  [[ -f "$db" ]] || { echo -e "${YLW}No hay resumen todavía (db vacío). Esperá 1 ciclo del scanner.${NC}"; return 0; }
+
+  if [[ "$mode" == "ip" ]]; then
+    printf "%-18s %-12s %-10s\n" "IP" "TOTAL(MB)" "REQ"
+    echo "---------------------------------------------"
+  else
+    printf "%-22s %-12s %-10s\n" "BACKEND" "TOTAL(MB)" "REQ"
+    echo "---------------------------------------------------"
+  fi
+
+  # db: key \t bytes \t req
+  awk -F'\t' -v mode="$mode" '
+    {
+      k=$1; b=$2+0; r=$3+0;
+      mb=b/1024/1024;
+      if(mode=="ip"){
+        printf "%-18s %-12.2f %-10d\n", k, mb, r
+      } else {
+        printf "%-22s %-12.2f %-10d\n", k, mb, r
+      }
+    }
+  ' "$db" | head -n 30
+  return 0
+}
+
+traffic_scan_menu() {
+  read_cfg
+  echo -e "${CYA}Escaneo permanente de tráfico (scanner)${NC}"
+  echo -e "${DIM}Este modo deja “siempre escaneado” el tráfico, actualizando un resumen en /var/lib/backendmgr.${NC}\n"
+  echo "1) Activar / Cambiar (modo + intervalo)"
+  echo "2) Desactivar"
+  echo "3) Ver estado"
+  echo "0) Volver"
+  read -r -p "Opción: " op
+  echo
+  case "$op" in
+    1)
+      if ! have_systemd; then
+        echo -e "${YLW}⚠️ Requiere systemd/systemctl (Ubuntu normal sí lo tiene).${NC}"
+        return 0
+      fi
+      echo "Modo:"
+      echo " 1) backend (recomendada)  -> acumula por header ${HEADER_NAME}"
+      echo " 2) ip                    -> acumula por IP"
+      read -r -p "Elegí modo (1/2): " mo
+      local mode="backend"
+      [[ "$mo" == "2" ]] && mode="ip"
+      echo
+      echo -e "${DIM}Ejemplos intervalo: 30s | 1min | 5min | 10min${NC}"
+      read -r -p "Intervalo (Enter=${TRAFFIC_SCAN_INTERVAL}): " every
+      every="${every:-$TRAFFIC_SCAN_INTERVAL}"
+      traffic_scan_enable "$mode" "$every"
+      ;;
+    2) traffic_scan_disable ;;
+    3) traffic_scan_status ;;
+    0) return 0 ;;
+    *) echo -e "${YLW}Opción inválida.${NC}" ;;
+  esac
   return 0
 }
 
@@ -1079,12 +1418,18 @@ traffic_stats() {
   echo -e "${DIM}Archivo: ${STATS_LOG}${NC}"
   if [[ "${TRAFFIC_STATS_ENABLED}" == "true" ]]; then
     if [[ -n "${TRAFFIC_STATS_SINCE}" ]]; then
-      echo -e "${GRN}Estado: ACTIVADO${NC} (desde ${TRAFFIC_STATS_SINCE})"
+      echo -e "${GRN}Logging: ACTIVADO${NC} (desde ${TRAFFIC_STATS_SINCE})"
     else
-      echo -e "${GRN}Estado: ACTIVADO${NC}"
+      echo -e "${GRN}Logging: ACTIVADO${NC}"
     fi
   else
-    echo -e "${YLW}Estado: DESACTIVADO${NC}"
+    echo -e "${YLW}Logging: DESACTIVADO${NC}"
+  fi
+
+  if [[ "${TRAFFIC_SCAN_ENABLED}" == "true" ]]; then
+    echo -e "${GRN}Scanner: ACTIVADO${NC} (modo=${TRAFFIC_SCAN_MODE}, cada ${TRAFFIC_SCAN_INTERVAL})"
+  else
+    echo -e "${YLW}Scanner: DESACTIVADO${NC}"
   fi
   echo
 
@@ -1092,6 +1437,7 @@ traffic_stats() {
   echo "2) Por Backend (header)"
   echo "3) Activar logging de tráfico (stats)"
   echo "4) Desactivar logging de tráfico (stats)"
+  echo "5) ⚙️  Escaneo permanente (scanner): menú"
   echo "0) Volver"
   read -r -p "Opción: " op
   echo
@@ -1104,7 +1450,7 @@ traffic_stats() {
         return 0
       fi
       set_traffic_stats_enabled true
-      echo -e "${GRN}✅ Activado.${NC}"
+      echo -e "${GRN}✅ Logging activado.${NC}"
       echo -e "${DIM}Desde ahora se acumula tráfico en:${NC} ${STATS_LOG}"
       return 0
       ;;
@@ -1114,10 +1460,26 @@ traffic_stats() {
         return 0
       fi
       set_traffic_stats_enabled false
-      echo -e "${GRN}✅ Desactivado.${NC}"
+      echo -e "${GRN}✅ Logging desactivado.${NC}"
+      return 0
+      ;;
+    5)
+      traffic_scan_menu
       return 0
       ;;
     1|2)
+      # Si scanner activo: mostramos del DB (si existe). Si no: fallback al tail.
+      if [[ "${TRAFFIC_SCAN_ENABLED}" == "true" ]]; then
+        if [[ "$op" == "1" ]]; then
+          echo -e "${DIM}Mostrando desde resumen del scanner (acumulado).${NC}\n"
+          traffic_show_from_db "ip"
+        else
+          echo -e "${DIM}Mostrando desde resumen del scanner (acumulado).${NC}\n"
+          traffic_show_from_db "backend"
+        fi
+        return 0
+      fi
+
       [[ -f "$STATS_LOG" ]] || { echo -e "${YLW}No existe todavía: ${STATS_LOG}${NC}"; return 0; }
 
       local lines=5000
@@ -1206,6 +1568,10 @@ restore_bundle() {
   write_apply_conf
   rebuild_balancer_files
   rebuild_mothers_upstreams || true
+
+  # si scanner estaba activo, re-escribimos helper por las dudas
+  traffic_scan_write_helper >/dev/null 2>&1 || true
+
   nginx_test_reload
   echo -e "${GRN}✅ Restaurado.${NC}"
   return 0
@@ -1233,32 +1599,9 @@ nginx_services_menu() {
   esac
   return 0
 }
+
 # ------------------ MANTENIMIENTO PROGRAMADO (RAM / NGINX) ------------------
-
-have_systemd() { command -v systemctl >/dev/null 2>&1; }
-
-systemd_write_unit() {
-  local path="$1"
-  local content="$2"
-  echo "$content" > "$path"
-}
-
-systemd_reload_daemon() {
-  have_systemd || return 0
-  systemctl daemon-reload >/dev/null 2>&1 || true
-}
-
-systemd_enable_start_timer() {
-  local t="$1"
-  have_systemd || return 0
-  systemctl enable --now "$t" >/dev/null 2>&1 || true
-}
-
-systemd_disable_stop_timer() {
-  local t="$1"
-  have_systemd || return 0
-  systemctl disable --now "$t" >/dev/null 2>&1 || true
-}
+# (tu bloque ya estaba OK; lo dejo tal cual y solo se apoya en have_systemd definido arriba)
 
 # -------- RAM refresh (drop_caches) --------
 ramrefresh_units_names() {
@@ -1504,6 +1847,7 @@ maintenance_menu() {
   return 0
 }
 
+# ------------------ SPEEDTEST ------------------
 speedtest_install_if_needed() {
   if command -v speedtest >/dev/null 2>&1; then
     return 0
@@ -1555,7 +1899,7 @@ menu() {
   echo "  8) 🧩 Editar timeouts del dominio madre (manual por nombre)"
   echo "  9) ⚖️ Balanceo de MADRES (VPS pool por dominio)"
   echo " 10) 🚦 Limitar ancho de banda por IP o Backend (limit_rate)"
-  echo " 11) 📊 Tráfico por IP / Backend (stats log)"
+  echo " 11) 📊 Tráfico por IP / Backend (stats log + scanner)"
   echo " 12) 🔥 Firewall UFW: abrir puerto (80/443/otro)"
   echo " 13) 💾 Backup"
   echo " 14) ♻️  Restaurar backup"
@@ -1578,6 +1922,17 @@ main() {
   write_apply_conf >/dev/null 2>&1 || true
   rebuild_balancer_files >/dev/null 2>&1 || true
   rebuild_mothers_upstreams >/dev/null 2>&1 || true
+
+  # ✅ Si el scanner está activado en config, aseguramos helper + timer (sin tocar nada más)
+  if have_systemd && [[ "${TRAFFIC_SCAN_ENABLED}" == "true" ]]; then
+    traffic_scan_write_helper >/dev/null 2>&1 || true
+    # si el timer no existe, lo recreamos
+    if ! systemctl list-unit-files 2>/dev/null | grep -q '^backendmgr-traffic-scan\.timer'; then
+      traffic_scan_write_units "${TRAFFIC_SCAN_INTERVAL}" >/dev/null 2>&1 || true
+      systemd_reload_daemon
+      systemctl enable --now backendmgr-traffic-scan.timer >/dev/null 2>&1 || true
+    fi
+  fi
 
   while true; do
     banner
