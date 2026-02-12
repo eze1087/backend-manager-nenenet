@@ -1233,6 +1233,276 @@ nginx_services_menu() {
   esac
   return 0
 }
+# ------------------ MANTENIMIENTO PROGRAMADO (RAM / NGINX) ------------------
+
+have_systemd() { command -v systemctl >/dev/null 2>&1; }
+
+systemd_write_unit() {
+  local path="$1"
+  local content="$2"
+  echo "$content" > "$path"
+}
+
+systemd_reload_daemon() {
+  have_systemd || return 0
+  systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+systemd_enable_start_timer() {
+  local t="$1"
+  have_systemd || return 0
+  systemctl enable --now "$t" >/dev/null 2>&1 || true
+}
+
+systemd_disable_stop_timer() {
+  local t="$1"
+  have_systemd || return 0
+  systemctl disable --now "$t" >/dev/null 2>&1 || true
+}
+
+# -------- RAM refresh (drop_caches) --------
+ramrefresh_units_names() {
+  echo "backendmgr-ramrefresh.service backendmgr-ramrefresh.timer"
+}
+
+ramrefresh_install_or_update() {
+  local every="$1"   # ej: 15min | 2h | 30min
+  [[ -n "$every" ]] || return 0
+
+  if ! have_systemd; then
+    echo -e "${YLW}⚠️ No hay systemd/systemctl. No puedo programarlo en este sistema.${NC}"
+    return 0
+  fi
+
+  # Service
+  systemd_write_unit "/etc/systemd/system/backendmgr-ramrefresh.service" \
+"[Unit]
+Description=BackendMgr RAM refresh (sync + drop caches)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -lc 'sync; echo 3 > /proc/sys/vm/drop_caches'
+"
+
+  # Timer
+  systemd_write_unit "/etc/systemd/system/backendmgr-ramrefresh.timer" \
+"[Unit]
+Description=BackendMgr RAM refresh timer
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=${every}
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"
+
+  systemd_reload_daemon
+  systemd_enable_start_timer "backendmgr-ramrefresh.timer"
+
+  echo -e "${GRN}✅ RAM refresh programado cada:${NC} ${every}"
+  return 0
+}
+
+ramrefresh_disable() {
+  if ! have_systemd; then
+    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    return 0
+  fi
+
+  systemd_disable_stop_timer "backendmgr-ramrefresh.timer"
+  rm -f /etc/systemd/system/backendmgr-ramrefresh.timer /etc/systemd/system/backendmgr-ramrefresh.service 2>/dev/null || true
+  systemd_reload_daemon
+  echo -e "${GRN}✅ RAM refresh desactivado.${NC}"
+  return 0
+}
+
+ramrefresh_status() {
+  if ! have_systemd; then
+    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    return 0
+  fi
+
+  systemctl status backendmgr-ramrefresh.timer --no-pager 2>/dev/null || true
+  echo
+  systemctl list-timers --all | grep -E 'backendmgr-ramrefresh' || true
+  return 0
+}
+
+ramrefresh_menu() {
+  echo -e "${CYA}Refresco de RAM programado (sync + drop_caches)${NC}"
+  echo -e "${DIM}Crea un timer systemd que ejecuta: sync; echo 3 > /proc/sys/vm/drop_caches${NC}\n"
+  echo "1) Activar / Cambiar intervalo"
+  echo "2) Ver estado"
+  echo "3) Desactivar"
+  echo "0) Volver"
+  read -r -p "Opción: " op
+  echo
+  case "$op" in
+    1)
+      echo -e "${DIM}Ejemplos: 15min | 30min | 1h | 2h${NC}"
+      read -r -p "Cada cuánto (formato systemd, ej 30min / 2h): " every
+      [[ -n "${every:-}" ]] || { echo -e "${YLW}Cancelado.${NC}"; return 0; }
+      ramrefresh_install_or_update "$every"
+      ;;
+    2) ramrefresh_status ;;
+    3) ramrefresh_disable ;;
+    0) return 0 ;;
+    *) echo -e "${YLW}Opción inválida.${NC}" ;;
+  esac
+  return 0
+}
+
+# -------- Nginx: habilitar arranque + reload/restart programado --------
+nginx_autostart_menu() {
+  echo -e "${CYA}Nginx: arranque con el sistema${NC}\n"
+  echo "1) Activar (enable)"
+  echo "2) Desactivar (disable)"
+  echo "3) Ver estado"
+  echo "0) Volver"
+  read -r -p "Opción: " op
+  echo
+  case "$op" in
+    1) systemctl enable nginx >/dev/null 2>&1 || true; echo -e "${GRN}✅ Nginx habilitado al inicio.${NC}" ;;
+    2) systemctl disable nginx >/dev/null 2>&1 || true; echo -e "${GRN}✅ Nginx deshabilitado al inicio.${NC}" ;;
+    3) systemctl is-enabled nginx 2>/dev/null || true; systemctl status nginx --no-pager 2>/dev/null || true ;;
+    0) return 0 ;;
+    *) echo -e "${YLW}Opción inválida.${NC}" ;;
+  esac
+  return 0
+}
+
+nginx_sched_write_units() {
+  local action="$1"   # reload | restart
+  local every="$2"    # 30min | 2h
+  local svc="backendmgr-nginx-${action}.service"
+  local tmr="backendmgr-nginx-${action}.timer"
+
+  systemd_write_unit "/etc/systemd/system/${svc}" \
+"[Unit]
+Description=BackendMgr Nginx ${action} (safe)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -lc 'nginx -t && systemctl ${action} nginx'
+"
+
+  systemd_write_unit "/etc/systemd/system/${tmr}" \
+"[Unit]
+Description=BackendMgr Nginx ${action} timer
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=${every}
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"
+}
+
+nginx_sched_enable() {
+  local action="$1" every="$2"
+  if ! have_systemd; then
+    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    return 0
+  fi
+  nginx_sched_write_units "$action" "$every"
+  systemd_reload_daemon
+  systemd_enable_start_timer "backendmgr-nginx-${action}.timer"
+  echo -e "${GRN}✅ Nginx ${action} programado cada:${NC} ${every}"
+  return 0
+}
+
+nginx_sched_disable() {
+  local action="$1"
+  if ! have_systemd; then
+    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    return 0
+  fi
+  systemd_disable_stop_timer "backendmgr-nginx-${action}.timer"
+  rm -f "/etc/systemd/system/backendmgr-nginx-${action}.timer" "/etc/systemd/system/backendmgr-nginx-${action}.service" 2>/dev/null || true
+  systemd_reload_daemon
+  echo -e "${GRN}✅ Nginx ${action} desactivado.${NC}"
+  return 0
+}
+
+nginx_sched_status() {
+  local action="$1"
+  if ! have_systemd; then
+    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    return 0
+  fi
+  systemctl status "backendmgr-nginx-${action}.timer" --no-pager 2>/dev/null || true
+  echo
+  systemctl list-timers --all | grep -E "backendmgr-nginx-${action}" || true
+  return 0
+}
+
+nginx_sched_menu() {
+  echo -e "${CYA}Nginx programado (reload/restart)${NC}"
+  echo -e "${DIM}No borra configs: solo hace nginx -t y luego reload/restart.${NC}\n"
+  echo "1) Programar RELOAD"
+  echo "2) Desactivar RELOAD"
+  echo "3) Estado RELOAD"
+  echo "4) Programar RESTART"
+  echo "5) Desactivar RESTART"
+  echo "6) Estado RESTART"
+  echo "0) Volver"
+  read -r -p "Opción: " op
+  echo
+  case "$op" in
+    1)
+      echo -e "${DIM}Ejemplos: 15min | 30min | 1h | 2h${NC}"
+      read -r -p "Cada cuánto (ej 30min / 2h): " every
+      [[ -n "${every:-}" ]] || { echo -e "${YLW}Cancelado.${NC}"; return 0; }
+      nginx_sched_enable "reload" "$every"
+      ;;
+    2) nginx_sched_disable "reload" ;;
+    3) nginx_sched_status "reload" ;;
+    4)
+      echo -e "${DIM}Ejemplos: 1h | 6h | 12h | 24h${NC}"
+      read -r -p "Cada cuánto (ej 6h / 12h): " every
+      [[ -n "${every:-}" ]] || { echo -e "${YLW}Cancelado.${NC}"; return 0; }
+      nginx_sched_enable "restart" "$every"
+      ;;
+    5) nginx_sched_disable "restart" ;;
+    6) nginx_sched_status "restart" ;;
+    0) return 0 ;;
+    *) echo -e "${YLW}Opción inválida.${NC}" ;;
+  esac
+  return 0
+}
+
+maintenance_menu() {
+  if ! have_systemd; then
+    echo -e "${YLW}⚠️ Este menú requiere systemd/systemctl (Ubuntu normal sí lo tiene).${NC}"
+    return 0
+  fi
+
+  echo -e "${CYA}🧰 Mantenimiento programado${NC}\n"
+  echo "1) 🧠 Refresco RAM (drop_caches) programado"
+  echo "2) ⚙️  Nginx: habilitar/deshabilitar arranque con el sistema"
+  echo "3) 🔁 Nginx: programar reload/restart"
+  echo "4) 📋 Ver timers backendmgr"
+  echo "0) Volver"
+  read -r -p "Opción: " op
+  echo
+  case "$op" in
+    1) ramrefresh_menu ;;
+    2) nginx_autostart_menu ;;
+    3) nginx_sched_menu ;;
+    4) systemctl list-timers --all | grep -E 'backendmgr-' || { echo "No hay timers backendmgr."; } ;;
+    0) return 0 ;;
+    *) echo -e "${YLW}Opción inválida.${NC}" ;;
+  esac
+  return 0
+}
 
 speedtest_install_if_needed() {
   if command -v speedtest >/dev/null 2>&1; then
@@ -1291,6 +1561,7 @@ menu() {
   echo " 14) ♻️  Restaurar backup"
   echo " 15) ⚙️  Servicios de Nginx (Status/Stop/Start/Reload/Restart)"
   echo " 16) 🚀 Speedtest (Ping / Bajada / Subida)"
+  echo " 17) 🧰 Mantenimiento programado (RAM / Nginx timers)"
   echo "  0) 🚪 Salir"
   echo
 }
@@ -1331,6 +1602,7 @@ main() {
      14) restore_bundle; pause ;;
      15) nginx_services_menu; pause ;;
      16) speedtest_menu; pause ;;
+     17) maintenance_menu; pause ;;
       0) exit 0 ;;
       *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
     esac
