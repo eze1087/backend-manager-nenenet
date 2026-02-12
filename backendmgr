@@ -99,6 +99,10 @@ write_default_cfg() {
   "curl_timeout_seconds": 8,
   "traffic_window_seconds": 60,
   "stats_log_path": "/var/log/nginx/backendmgr.stats.log",
+
+  "traffic_stats_enabled": true,
+  "traffic_stats_since": "",
+
   "balance_mode": "off",
   "balance_max_slots_cap": 64
 }
@@ -107,10 +111,16 @@ JSON
 
 ensure_cfg() {
   [[ -f "$CFG_FILE" ]] || write_default_cfg
-  # asegurar key balance_max_slots_cap en configs viejos
+  # asegurar keys en configs viejos
   local tmp
   tmp="$(mktemp)"
-  jq '.balance_max_slots_cap = (.balance_max_slots_cap // 64)' "$CFG_FILE" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+
+  jq '
+    .balance_max_slots_cap = (.balance_max_slots_cap // 64)
+    | .traffic_stats_enabled = (.traffic_stats_enabled // true)
+    | .traffic_stats_since = (.traffic_stats_since // "")
+  ' "$CFG_FILE" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+
   mv "$tmp" "$CFG_FILE"
 }
 
@@ -152,6 +162,11 @@ read_cfg() {
   CURL_TMO="$(jq -r '.curl_timeout_seconds // 8' "$CFG_FILE" 2>/dev/null || echo "8")"
   WINDOW_SEC="$(jq -r '.traffic_window_seconds // 60' "$CFG_FILE" 2>/dev/null || echo "60")"
   STATS_LOG="$(jq -r '.stats_log_path // "/var/log/nginx/backendmgr.stats.log"' "$CFG_FILE" 2>/dev/null || echo "/var/log/nginx/backendmgr.stats.log")"
+
+  # ✅ NUEVO (para opción 11)
+  TRAFFIC_STATS_ENABLED="$(jq -r '.traffic_stats_enabled // true' "$CFG_FILE" 2>/dev/null || echo "true")"
+  TRAFFIC_STATS_SINCE="$(jq -r '.traffic_stats_since // ""' "$CFG_FILE" 2>/dev/null || echo "")"
+  [[ "$TRAFFIC_STATS_SINCE" == "null" ]] && TRAFFIC_STATS_SINCE=""
 
   BAL_MODE="$(jq -r '.balance_mode // "off"' "$CFG_FILE" 2>/dev/null || echo "off")"
 
@@ -337,7 +352,20 @@ write_apply_conf() {
 
   cat > "$NGX_APPLY_SNIP" <<EOF
 # ${APP_NAME} apply.conf
+EOF
+
+  # ✅ NUEVO: activar/desactivar logging de tráfico (opción 11)
+  if [[ "${TRAFFIC_STATS_ENABLED}" == "true" ]]; then
+    cat >> "$NGX_APPLY_SNIP" <<EOF
 access_log ${STATS_LOG} backendmgr_stats;
+EOF
+  else
+    cat >> "$NGX_APPLY_SNIP" <<'EOF'
+access_log off;
+EOF
+  fi
+
+  cat >> "$NGX_APPLY_SNIP" <<EOF
 
 EOF
 
@@ -358,6 +386,25 @@ EOF
 # Speed limits (0 = unlimited) calculado en http{} por maps
 limit_rate $nenenet_rate;
 EOF
+}
+
+# ✅ NUEVO: toggles para opción 11 (sin tocar tus otras opciones)
+set_traffic_stats_enabled() {
+  local new="$1" # true/false
+  local since=""
+  if [[ "$new" == "true" ]]; then
+    since="$(date '+%Y-%m-%d %H:%M:%S')"
+  fi
+
+  jq --argjson en "$new" --arg since "$since" '
+    .traffic_stats_enabled = $en
+    | .traffic_stats_since = $since
+  ' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
+
+  read_cfg
+  write_apply_conf
+  nginx_test_reload
+  return 0
 }
 
 # ------------------ MOTHERS BALANCE (por dominio madre) ------------------
@@ -1027,51 +1074,85 @@ validate_connection_test() {
 # ------------------ TRÁFICO (IP / BACKEND) ------------------
 traffic_stats() {
   read_cfg
+
   echo -e "${CYA}Tráfico (por IP o Backend)${NC}"
-  echo -e "${DIM}Lee ${STATS_LOG}. Si está vacío, no hubo tráfico aún.${NC}\n"
-
-  [[ -f "$STATS_LOG" ]] || { echo -e "${YLW}No existe todavía: ${STATS_LOG}${NC}"; return 0; }
-
-  local lines=5000
-  read -r -p "Cantidad de líneas a analizar (Enter=${lines}): " in
-  lines="${in:-$lines}"
-
+  echo -e "${DIM}Archivo: ${STATS_LOG}${NC}"
+  if [[ "${TRAFFIC_STATS_ENABLED}" == "true" ]]; then
+    if [[ -n "${TRAFFIC_STATS_SINCE}" ]]; then
+      echo -e "${GRN}Estado: ACTIVADO${NC} (desde ${TRAFFIC_STATS_SINCE})"
+    else
+      echo -e "${GRN}Estado: ACTIVADO${NC}"
+    fi
+  else
+    echo -e "${YLW}Estado: DESACTIVADO${NC}"
+  fi
   echo
+
   echo "1) Por IP"
   echo "2) Por Backend (header)"
+  echo "3) Activar logging de tráfico (stats)"
+  echo "4) Desactivar logging de tráfico (stats)"
+  echo "0) Volver"
   read -r -p "Opción: " op
+  echo
 
   case "$op" in
-    1)
-      echo
-      printf "%-18s %-12s %-10s\n" "IP" "TOTAL(MB)" "REQ"
-      echo "---------------------------------------------"
-      tail -n "$lines" "$STATS_LOG" | awk -F'|' '
-        {ip=$2; bytes=$7; req[ip]+=1; b[ip]+=bytes}
-        END{
-          for(i in b){
-            mb=b[i]/1024/1024;
-            printf "%-18s %-12.2f %-10d\n", i, mb, req[i]
-          }
-        }' | sort -k2 -nr | head -n 30
+    0) return 0 ;;
+    3)
+      if [[ "${TRAFFIC_STATS_ENABLED}" == "true" ]]; then
+        echo -e "${YLW}Ya está activado.${NC}"
+        return 0
+      fi
+      set_traffic_stats_enabled true
+      echo -e "${GRN}✅ Activado.${NC}"
+      echo -e "${DIM}Desde ahora se acumula tráfico en:${NC} ${STATS_LOG}"
+      return 0
       ;;
-    2)
-      echo
-      printf "%-22s %-12s %-10s\n" "BACKEND" "TOTAL(MB)" "REQ"
-      echo "---------------------------------------------------"
-      tail -n "$lines" "$STATS_LOG" | awk -F'|' '
-        {be=$4; if(be=="") be="(vacío)"; bytes=$7; req[be]+=1; b[be]+=bytes}
-        END{
-          for(i in b){
-            mb=b[i]/1024/1024;
-            printf "%-22s %-12.2f %-10d\n", i, mb, req[i]
-          }
-        }' | sort -k2 -nr | head -n 30
+    4)
+      if [[ "${TRAFFIC_STATS_ENABLED}" != "true" ]]; then
+        echo -e "${YLW}Ya está desactivado.${NC}"
+        return 0
+      fi
+      set_traffic_stats_enabled false
+      echo -e "${GRN}✅ Desactivado.${NC}"
+      return 0
       ;;
-    *) echo "Opción inválida" ;;
-  esac
+    1|2)
+      [[ -f "$STATS_LOG" ]] || { echo -e "${YLW}No existe todavía: ${STATS_LOG}${NC}"; return 0; }
 
-  return 0
+      local lines=5000
+      read -r -p "Cantidad de líneas a analizar (Enter=${lines}): " in
+      lines="${in:-$lines}"
+      echo
+
+      if [[ "$op" == "1" ]]; then
+        printf "%-18s %-12s %-10s\n" "IP" "TOTAL(MB)" "REQ"
+        echo "---------------------------------------------"
+        tail -n "$lines" "$STATS_LOG" | awk -F'|' '
+          {ip=$2; bytes=$7; req[ip]+=1; b[ip]+=bytes}
+          END{
+            for(i in b){
+              mb=b[i]/1024/1024;
+              printf "%-18s %-12.2f %-10d\n", i, mb, req[i]
+            }
+          }' | sort -k2 -nr | head -n 30
+      else
+        printf "%-22s %-12s %-10s\n" "BACKEND" "TOTAL(MB)" "REQ"
+        echo "---------------------------------------------------"
+        tail -n "$lines" "$STATS_LOG" | awk -F'|' '
+          {be=$4; if(be=="") be="(vacío)"; bytes=$7; req[be]+=1; b[be]+=bytes}
+          END{
+            for(i in b){
+              mb=b[i]/1024/1024;
+              printf "%-22s %-12.2f %-10d\n", i, mb, req[i]
+            }
+          }' | sort -k2 -nr | head -n 30
+      fi
+
+      return 0
+      ;;
+    *) echo "Opción inválida"; return 0 ;;
+  esac
 }
 
 # ------------------ FIREWALL UFW ------------------
