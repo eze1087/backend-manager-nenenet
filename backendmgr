@@ -621,19 +621,29 @@ traffic_scan_enable() {
     return 0
   fi
 
+  # ✅ requisito: el access_log debe estar ACTIVADO para que exista tráfico que escanear
+  read_cfg
+  if [[ "${TRAFFIC_STATS_ENABLED}" != "true" ]]; then
+    echo -e "${YLW}⚠️ El logging de tráfico estaba DESACTIVADO. Lo activo automáticamente.${NC}"
+    set_traffic_stats_enabled true
+  fi
+
   # limpiar estado si se cambia modo (para que arranque prolijo)
-  rm -f /var/lib/backendmgr/traffic_scan.state 2>/dev/null || true
+  rm -f /var/lib/backendmgr/traffic.scan.*.db 2>/dev/null || true
 
-  set_traffic_scan_cfg true "$mode" "$interval"
+  # guardar config
+  jq --arg mode "$mode" --arg interval "$interval" '
+    .traffic_scan_enabled = true
+    | .traffic_scan_mode = $mode
+    | .traffic_scan_interval = $interval
+  ' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
 
-  traffic_scan_write_units "$interval"
+  traffic_scan_install_or_update_units "$mode" "$interval"
   systemd_reload_daemon
   systemd_enable_start_timer "backendmgr-traffic-scan.timer"
 
-  # disparar una vez ahora
-  /usr/local/sbin/backendmgr-traffic-scan.sh >/dev/null 2>&1 || true
-
-  echo -e "${GRN}✅ Escaneo permanente ACTIVADO:${NC} modo=${mode} intervalo=${interval}"
+  echo -e "${GRN}✅ Scan permanente activado:${NC} modo=${mode} cada ${interval}"
+  echo -e "${DIM}Va acumulando totales en /var/lib/backendmgr/traffic.scan.*.db${NC}"
   return 0
 }
 
@@ -1438,6 +1448,7 @@ traffic_stats() {
   echo "3) Activar logging de tráfico (stats)"
   echo "4) Desactivar logging de tráfico (stats)"
   echo "5) ⚙️  Escaneo permanente (scanner): menú"
+  echo "6) 📌 Totales acumulados (recalcular y mostrar)"
   echo "0) Volver"
   read -r -p "Opción: " op
   echo
@@ -1467,6 +1478,19 @@ traffic_stats() {
       traffic_scan_menu
       return 0
       ;;
+    6)
+      echo -e "${CYA}Totales acumulados (usa todo el log y actualiza DB)${NC}"
+      echo "1) Por IP"
+      echo "2) Por Backend (header)"
+      read -r -p "Opción: " which
+      case "$which" in
+        1) traffic_scan_run_now "ip"; echo; traffic_show_from_db "ip" ;;
+        2) traffic_scan_run_now "backend"; echo; traffic_show_from_db "backend" ;;
+        *) echo -e "${YLW}Opción inválida.${NC}" ;;
+      esac
+      return 0
+      ;;
+
     1|2)
       # Si scanner activo: mostramos del DB (si existe). Si no: fallback al tail.
       if [[ "${TRAFFIC_SCAN_ENABLED}" == "true" ]]; then
