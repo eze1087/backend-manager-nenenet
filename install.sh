@@ -33,16 +33,7 @@ need_root(){ [[ ${EUID:-999} -eq 0 ]] || { echo "ERROR: ejecutá con sudo."; exi
 backup_file(){
   local f="$1"
   mkdir -p "$BACKUP_DIR"
-  if [[ -e "$f" ]]; then
-    local b="${BACKUP_DIR}/$(basename "$f").bak-$(date +%Y%m%d-%H%M%S)"
-    cp -a "$f" "$b" || true
-
-    # ✅ Limpieza: no llenar el disco
-    # - Borra backups de +30 días
-    find "$BACKUP_DIR" -maxdepth 1 -type f -name "$(basename "$f").bak-*" -mtime +30 -delete 2>/dev/null || true
-    # - Deja solo los últimos 15 por archivo (por si hay muchas instalaciones seguidas)
-    ls -1t "$BACKUP_DIR/$(basename "$f").bak-"* 2>/dev/null | tail -n +16 | xargs -r rm -f 2>/dev/null || true
-  fi
+  [[ -e "$f" ]] && cp -a "$f" "${BACKUP_DIR}/$(basename "$f").bak-$(date +%Y%m%d-%H%M%S)" || true
 }
 
 write_default_cfg(){
@@ -147,17 +138,19 @@ EOF
 }
 
 write_backendmgr_conf_full(){
-  
-      cat > "$NGX_MAIN_INCLUDE" <<EOF
+  cat > "$NGX_MAIN_INCLUDE" <<EOF
 # ${APP_NAME} (http{})
 include ${NGX_LOGGING_SNIP};
 
-# rate-limit zones
+# rate-limit zones (valores reales los aplica apply.conf)
 limit_req_zone \$binary_remote_addr zone=backendmgr_req:10m rate=10r/s;
 limit_conn_zone \$binary_remote_addr zone=backendmgr_conn:10m;
 
-# balancer conf
+# balancer legacy
 include ${NGX_BALANCER_CONF};
+
+# mothers upstreams (si está vacío no pasa nada)
+include ${NGX_MOTHERS_UPSTREAMS};
 
 # speed-limit maps
 map \$remote_addr \$ip_limit_rate { default 0; include ${NGX_LIMITS_IP}; }
@@ -173,6 +166,7 @@ map \$nenenet_rate_step1 \$nenenet_rate {
   0 \$ip_limit_rate;
 }
 
+# ✅ IMPORTANTÍSIMO: variable usada por targets/*.conf
 map \$backendmgr_balance \$nenenet_backend_url {
   0 \$backend_url;
   1 \$balanced_backend_url;
