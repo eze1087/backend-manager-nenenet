@@ -219,30 +219,6 @@ primary_domain_active() {
   echo "(no configurado)"
 }
 
-# -------- Banner helpers (mothers/traffic status) --------
-mothers_status_for_domain() {
-  local dom="${1:-}"
-  [[ -n "$dom" && "$dom" != "(no configurado)" ]] || { echo "N/A"; return 0; }
-  local tf="$(target_file "$dom")"
-  if [[ -f "$tf" ]] && grep -qE 'proxy_pass\s+http://backendmgr_mothers_' "$tf" 2>/dev/null; then
-    echo "ON"
-  else
-    echo "OFF"
-  fi
-}
-
-traffic_status_for_banner() {
-  local log="OFF"
-  [[ "${TRAFFIC_STATS_ENABLED:-false}" == "true" ]] && log="ON"
-  local sc="OFF"
-  if [[ "${TRAFFIC_SCAN_ENABLED:-false}" == "true" ]]; then
-    local mode="${TRAFFIC_SCAN_MODE:-backend}"
-    local every="${TRAFFIC_SCAN_INTERVAL:-1min}"
-    sc="ON (${mode}, ${every})"
-  fi
-  echo "log ${log} | scanner ${sc}"
-}
-
 last_backup_info() {
   local file
   file="$(ls -1t "${BACKUP_DIR}"/bundle-*.tar.gz 2>/dev/null | head -n1 || true)"
@@ -289,11 +265,34 @@ mem_used_line() {
 }
 
 cpu_line() {
-  local cores load1 load5 load15
-  cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
+  local cpu_c load1 load5 load15 cpu_pct
+  cpu_c="$(nproc 2>/dev/null || echo 1)"
   read -r load1 load5 load15 _ < /proc/loadavg 2>/dev/null || { load1="0.00"; load5="0.00"; load15="0.00"; }
-  echo "🧩 CPU: ${cores}c | load ${load1}/${load5}/${load15}"
+
+  # CPU usage % (muestra instantáneo, no histórico)
+  cpu_pct="?"
+  if [[ -r /proc/stat ]]; then
+    local a b
+    a="$(awk '/^cpu /{print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11}' /proc/stat 2>/dev/null || true)"
+    sleep 0.12
+    b="$(awk '/^cpu /{print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11}' /proc/stat 2>/dev/null || true)"
+    if [[ -n "$a" && -n "$b" ]]; then
+      cpu_pct="$(awk -v a="$a" -v b="$b" 'BEGIN{
+        split(a, A, " "); split(b, B, " ");
+        idleA=A[4]+A[5]; idleB=B[4]+B[5];
+        nonA=A[1]+A[2]+A[3]+A[6]+A[7]+A[8];
+        nonB=B[1]+B[2]+B[3]+B[6]+B[7]+B[8];
+        totalA=idleA+nonA; totalB=idleB+nonB;
+        total=totalB-totalA; idle=idleB-idleA;
+        if(total<=0){print "?"} else {printf "%.0f", (100*(total-idle)/total)}
+      }')"
+    fi
+  fi
+
+  echo "🧩 CPU: ${cpu_c}c | uso ${cpu_pct}% | load ${load1}/${load5}/${load15}"
 }
+
+
 
 net_totals_line() {
   # totals since boot (RX/TX)
@@ -361,14 +360,14 @@ banner() {
   local l1 l2 l3 l4 l5 l6 l7 l8 l9 l10
   l1="🚀 ${APP_NAME} v${APP_VER}"
   l2="🟢 Nginx: ${ng_state} | 🌐 Dominios: ${dcount} | 🧱 Backends: ${bcount}"
-  l3="🌐 Madre: ${dom_active} | 🏷️ Header: ${HEADER_NAME}"
-  l4="🧩 CPU: ${cpu_c}c | load ${cpu_load}"
-  l5="🧠 RAM: ${ram_used} / ${ram_total} (${ram_pct}%) | ♻️ last ${last_ramrefresh}"
-  l6="💽 Disk: ${disk_used} / ${disk_total} (${disk_pct}%)"
-  l7="📡 NET: ⬇️ ${net_rx} | ⬆️ ${net_tx} (desde boot)"
-  l8="⚖️ Madres: $(mothers_status_for_domain \"${dom_active}\") | 📊 Tráfico: $(traffic_status_for_banner)"
-  l9="💾 Backup: ${bkp}"
-  l10="$(ramrefresh_last_line)"
+  l3="👑 Dominio madre activo: ${dom_active}"
+  l4="🏷️  Header: ${HEADER_NAME}"
+  l5="📈 Tráfico: log $(traffic_log_state_short) | scan $(traffic_scan_state_short)"
+  l6="💾 Backup: ${bkp}"
+  l7="$(mem_used_line 2>/dev/null || echo "🧠 RAM: n/a")"
+  l8="$(cpu_line 2>/dev/null || echo "🧩 CPU: n/a")"
+  l9="$(net_totals_line 2>/dev/null || echo "📡 NET: n/a")"
+  l10="$(ramrefresh_last_line 2>/dev/null || echo "🧽 RAM refresh: n/a")"
 
   local W=62
   local n
@@ -893,7 +892,6 @@ traffic_show_from_db() {
   fi
 
   # db: key \t bytes \t req
-  ( set +o pipefail
   awk -F'\t' -v mode="$mode" '
     {
       k=$1; b=$2+0; r=$3+0;
@@ -904,8 +902,7 @@ traffic_show_from_db() {
         printf "%-22s %-12.2f %-10d\n", k, mb, r
       }
     }
-  ' "$db" | head -n 30
-  ) || true
+  ' "$db" | head -n 30 || true
   return 0
 }
 
@@ -1710,7 +1707,7 @@ traffic_stats() {
               mb=b[i]/1024/1024;
               printf "%-18s %-12.2f %-10d\n", i, mb, req[i]
             }
-          }' | sort -k2 -nr | head -n 30
+          }' | sort -k2 -nr | head -n 30 || true
       else
         printf "%-22s %-12s %-10s\n" "BACKEND" "TOTAL(MB)" "REQ"
         echo "---------------------------------------------------"
@@ -1721,7 +1718,7 @@ traffic_stats() {
               mb=b[i]/1024/1024;
               printf "%-22s %-12.2f %-10d\n", i, mb, req[i]
             }
-          }' | sort -k2 -nr | head -n 30
+          }' | sort -k2 -nr | head -n 30 || true
       fi
 
       return 0
