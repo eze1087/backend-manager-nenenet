@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_NAME="Backend Manager Nenenet 3.0"
-PANEL_URL_BASE="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main"
+PANEL_URL="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main/backendmgr"
 PANEL_DST="/usr/local/bin/backendmgr"
 
 CFG_DIR="/etc/backendmgr"
@@ -33,7 +33,16 @@ need_root(){ [[ ${EUID:-999} -eq 0 ]] || { echo "ERROR: ejecutá con sudo."; exi
 backup_file(){
   local f="$1"
   mkdir -p "$BACKUP_DIR"
-  [[ -e "$f" ]] && cp -a "$f" "${BACKUP_DIR}/$(basename "$f").bak-$(date +%Y%m%d-%H%M%S)" || true
+  if [[ -e "$f" ]]; then
+    local b="${BACKUP_DIR}/$(basename "$f").bak-$(date +%Y%m%d-%H%M%S)"
+    cp -a "$f" "$b" || true
+
+    # ✅ Limpieza: no llenar el disco
+    # - Borra backups de +30 días
+    find "$BACKUP_DIR" -maxdepth 1 -type f -name "$(basename "$f").bak-*" -mtime +30 -delete 2>/dev/null || true
+    # - Deja solo los últimos 15 por archivo (por si hay muchas instalaciones seguidas)
+    ls -1t "$BACKUP_DIR/$(basename "$f").bak-"* 2>/dev/null | tail -n +16 | xargs -r rm -f 2>/dev/null || true
+  fi
 }
 
 write_default_cfg(){
@@ -98,19 +107,10 @@ ensure_cfg_keys(){
 
 download_panel(){
   echo "[3/9] Descargando panel..."
-  local tmp=/tmp/backendmgr
-  rm -f "$tmp" 2>/dev/null || true
-  # Compat: en el repo puede llamarse backendmgr o backendmgr.sh
-  local ok=0
-  for u in \
-    "${PANEL_URL_BASE}/backendmgr" \
-    "${PANEL_URL_BASE}/backendmgr.sh"; do
-    if curl -fsSL "$u" -o "$tmp"; then ok=1; break; fi
-  done
-  [[ "$ok" -eq 1 ]] || { echo "ERROR: no pude bajar backendmgr (URL 404 o sin permisos)."; exit 1; }
-  sed -i 's/\r$//' "$tmp" || true
-  bash -n "$tmp" || { echo "ERROR: backendmgr tiene errores de sintaxis."; exit 1; }
-  install -m 0755 "$tmp" "$PANEL_DST"
+  curl -fsSL "$PANEL_URL" -o /tmp/backendmgr || { echo "ERROR: no pude bajar backendmgr (URL 404 o sin permisos)."; exit 1; }
+  sed -i 's/\r$//' /tmp/backendmgr || true
+  bash -n /tmp/backendmgr || { echo "ERROR: backendmgr tiene errores de sintaxis."; exit 1; }
+  install -m 0755 /tmp/backendmgr "$PANEL_DST"
 }
 
 write_snippets_if_missing(){
@@ -147,19 +147,17 @@ EOF
 }
 
 write_backendmgr_conf_full(){
-  cat > "$NGX_MAIN_INCLUDE" <<EOF
+  
+      cat > "$NGX_MAIN_INCLUDE" <<EOF
 # ${APP_NAME} (http{})
 include ${NGX_LOGGING_SNIP};
 
-# rate-limit zones (valores reales los aplica apply.conf)
+# rate-limit zones
 limit_req_zone \$binary_remote_addr zone=backendmgr_req:10m rate=10r/s;
 limit_conn_zone \$binary_remote_addr zone=backendmgr_conn:10m;
 
-# balancer legacy
+# balancer conf
 include ${NGX_BALANCER_CONF};
-
-# mothers upstreams (si está vacío no pasa nada)
-include ${NGX_MOTHERS_UPSTREAMS};
 
 # speed-limit maps
 map \$remote_addr \$ip_limit_rate { default 0; include ${NGX_LIMITS_IP}; }
@@ -175,7 +173,6 @@ map \$nenenet_rate_step1 \$nenenet_rate {
   0 \$ip_limit_rate;
 }
 
-# ✅ IMPORTANTÍSIMO: variable usada por targets/*.conf
 map \$backendmgr_balance \$nenenet_backend_url {
   0 \$backend_url;
   1 \$balanced_backend_url;
