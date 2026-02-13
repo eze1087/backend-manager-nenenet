@@ -251,48 +251,94 @@ human_bytes() {
 }
 
 mem_used_line() {
-  # used/total (pct)
-  local mt ma used pct
-  mt="$(awk '/^MemTotal:/{print $2*1024}' /proc/meminfo 2>/dev/null || echo 0)"
-  ma="$(awk '/^MemAvailable:/{print $2*1024}' /proc/meminfo 2>/dev/null || echo 0)"
-  used=$(( mt>ma ? mt-ma : 0 ))
-  if [[ "$mt" -gt 0 ]]; then
-    pct=$(( used*100/mt ))
-  else
-    pct=0
-  fi
-  echo "🧠 RAM: $(human_bytes "$used") / $(human_bytes "$mt") (${pct}%)"
+  # /proc/meminfo en kB
+  awk '
+    /^MemTotal:/ {t=$2}
+    /^MemAvailable:/ {a=$2}
+    END{
+      if(t<=0){print "🧠 RAM: ?"; exit}
+      used=t-a; if(used<0) used=0
+      used_mb=used/1024
+      total_mb=t/1024
+      free_mb=a/1024
+      used_gb=used_mb/1024
+      total_gb=total_mb/1024
+      free_gb=free_mb/1024
+      pct=int((used*100)/t + 0.5)
+      fpct=100-pct; if(fpct<0) fpct=0
+      # Mostrar en MB si <1GB
+      if(total_gb < 1.0){
+        printf "🧠 RAM: %.0f MB / %.0f MB (%d%%) | libre %.0f MB (%d%%)", used_mb, total_mb, pct, free_mb, fpct
+      } else if(used_gb < 1.0){
+        printf "🧠 RAM: %.0f MB / %.2f GB (%d%%) | libre %.2f GB (%d%%)", used_mb, total_gb, pct, free_gb, fpct
+      } else {
+        printf "🧠 RAM: %.2f GB / %.2f GB (%d%%) | libre %.2f GB (%d%%)", used_gb, total_gb, pct, free_gb, fpct
+      }
+    }' /proc/meminfo 2>/dev/null || echo "🧠 RAM: ?"
+}
+
+cpu_usage_percent() {
+  # %CPU (aprox) usando /proc/stat (sin depender de tools extras)
+  local a b
+  a="$(awk '/^cpu /{print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11}' /proc/stat 2>/dev/null || true)"
+  [[ -n "$a" ]] || { echo "?"; return 0; }
+  sleep 0.15
+  b="$(awk '/^cpu /{print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11}' /proc/stat 2>/dev/null || true)"
+  [[ -n "$b" ]] || { echo "?"; return 0; }
+
+  # user nice system idle iowait irq softirq steal guest guest_nice
+  local au an as ai aw aq ar at ag ah
+  local bu bn bs bi bw bq br bt bg bh
+  read -r au an as ai aw aq ar at ag ah <<<"$a"
+  read -r bu bn bs bi bw bq br bt bg bh <<<"$b"
+
+  local atot=$((au+an+as+ai+aw+aq+ar+at))
+  local btot=$((bu+bn+bs+bi+bw+bq+br+bt))
+  local adle=$((ai+aw))
+  local bdle=$((bi+bw))
+
+  local dt=$((btot-atot))
+  local dd=$((bdle-adle))
+  if (( dt <= 0 )); then echo "0"; return 0; fi
+  local busy=$((dt-dd)); ((busy<0)) && busy=0
+  echo $(( (busy*100 + dt/2) / dt ))
 }
 
 cpu_line() {
-  local cpu_c load1 load5 load15 cpu_pct
-  cpu_c="$(nproc 2>/dev/null || echo 1)"
-  read -r load1 load5 load15 _ < /proc/loadavg 2>/dev/null || { load1="0.00"; load5="0.00"; load15="0.00"; }
-
-  # CPU usage % (muestra instantáneo, no histórico)
-  cpu_pct="?"
-  if [[ -r /proc/stat ]]; then
-    local a b
-    a="$(awk '/^cpu /{print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11}' /proc/stat 2>/dev/null || true)"
-    sleep 0.12
-    b="$(awk '/^cpu /{print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11}' /proc/stat 2>/dev/null || true)"
-    if [[ -n "$a" && -n "$b" ]]; then
-      cpu_pct="$(awk -v a="$a" -v b="$b" 'BEGIN{
-        split(a, A, " "); split(b, B, " ");
-        idleA=A[4]+A[5]; idleB=B[4]+B[5];
-        nonA=A[1]+A[2]+A[3]+A[6]+A[7]+A[8];
-        nonB=B[1]+B[2]+B[3]+B[6]+B[7]+B[8];
-        totalA=idleA+nonA; totalB=idleB+nonB;
-        total=totalB-totalA; idle=idleB-idleA;
-        if(total<=0){print "?"} else {printf "%.0f", (100*(total-idle)/total)}
-      }')"
-    fi
-  fi
-
-  echo "🧩 CPU: ${cpu_c}c | uso ${cpu_pct}% | load ${load1}/${load5}/${load15}"
+  local cores load cpu_pct
+  cores="$(nproc 2>/dev/null || echo 1)"
+  load="$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || echo "0.00 0.00 0.00")"
+  cpu_pct="$(cpu_usage_percent)"
+  echo "🧩 CPU: ${cores}c | uso ${cpu_pct}% | load ${load}"
 }
 
-
+disk_usage_line() {
+  # Disco raíz (/)
+  local used total avail pct fpct
+  local line
+  line="$(df -B1 / 2>/dev/null | awk 'NR==2{print $3,$2,$4,$5}' || true)"
+  if [[ -z "$line" ]]; then
+    echo "💽 DISK: ?"
+    return 0
+  fi
+  read -r used total avail pct <<<"$line"
+  pct="${pct%%%}"
+  [[ "$pct" =~ ^[0-9]+$ ]] || pct="?"
+  if [[ "$pct" =~ ^[0-9]+$ ]]; then
+    fpct=$((100-pct))
+  else
+    fpct="?"
+  fi
+  if command -v numfmt >/dev/null 2>&1; then
+    local used_h total_h avail_h
+    used_h="$(numfmt --to=iec --suffix=B "$used" 2>/dev/null || echo "${used}B")"
+    total_h="$(numfmt --to=iec --suffix=B "$total" 2>/dev/null || echo "${total}B")"
+    avail_h="$(numfmt --to=iec --suffix=B "$avail" 2>/dev/null || echo "${avail}B")"
+    echo "💽 DISK: ${used_h} / ${total_h} (${pct}%) | libre ${avail_h} (${fpct}%)"
+  else
+    echo "💽 DISK: ${used}B / ${total}B (${pct}%) | libre ${avail}B (${fpct}%)"
+  fi
+}
 
 net_totals_line() {
   # totals since boot (RX/TX)
@@ -361,17 +407,18 @@ banner() {
   l1="🚀 ${APP_NAME} v${APP_VER}"
   l2="🟢 Nginx: ${ng_state} | 🌐 Dominios: ${dcount} | 🧱 Backends: ${bcount}"
   l3="👑 Dominio madre activo: ${dom_active}"
-  l4="🏷️  Header: ${HEADER_NAME}"
-  l5="📈 Tráfico: log $(traffic_log_state_short) | scan $(traffic_scan_state_short)"
+  l4="🏷️  Header: ${HEADER_NAME} | ⚖️ Balance: ${BAL_MODE} (cap ${BAL_CAP})"
+  l5="📊 Stats: ${STATS_LOG}"
   l6="💾 Backup: ${bkp}"
-  l7="$(mem_used_line 2>/dev/null || echo "🧠 RAM: n/a")"
-  l8="$(cpu_line 2>/dev/null || echo "🧩 CPU: n/a")"
-  l9="$(net_totals_line 2>/dev/null || echo "📡 NET: n/a")"
-  l10="$(ramrefresh_last_line 2>/dev/null || echo "🧽 RAM refresh: n/a")"
+  l7="$(mem_used_line)"
+  l8="$(cpu_line)"
+  l9="$(disk_usage_line)"
+  l10="$(net_totals_line)"
+  l11="$(ramrefresh_last_line)"
 
   local W=62
   local n
-  for n in "${#l1}" "${#l2}" "${#l3}" "${#l4}" "${#l5}" "${#l6}" "${#l7}" "${#l8}" "${#l9}" "${#l10}"; do
+  for n in "${#l1}" "${#l2}" "${#l3}" "${#l4}" "${#l5}" "${#l6}" "${#l7}" "${#l8}" "${#l9}" "${#l10}" "${#l11}"; do
     (( n > W )) && W="$n"
   done
   (( W < 62 )) && W=62
@@ -388,6 +435,7 @@ banner() {
   box_line "$W" "$l8"
   box_line "$W" "$l9"
   box_line "$W" "$l10"
+  box_line "$W" "$l11"
   echo -e "${CYA}╚$(printf '═%.0s' $(seq 1 $((W+2))))╝${NC}"
   echo
 }
@@ -902,7 +950,7 @@ traffic_show_from_db() {
         printf "%-22s %-12.2f %-10d\n", k, mb, r
       }
     }
-  ' "$db" | head -n 30 || true
+  ' "$db" | head -n 30
   return 0
 }
 
@@ -1707,7 +1755,7 @@ traffic_stats() {
               mb=b[i]/1024/1024;
               printf "%-18s %-12.2f %-10d\n", i, mb, req[i]
             }
-          }' | sort -k2 -nr | head -n 30 || true
+          }' | sort -k2 -nr | head -n 30
       else
         printf "%-22s %-12s %-10s\n" "BACKEND" "TOTAL(MB)" "REQ"
         echo "---------------------------------------------------"
@@ -1718,7 +1766,7 @@ traffic_stats() {
               mb=b[i]/1024/1024;
               printf "%-22s %-12.2f %-10d\n", i, mb, req[i]
             }
-          }' | sort -k2 -nr | head -n 30 || true
+          }' | sort -k2 -nr | head -n 30
       fi
 
       return 0
@@ -1772,18 +1820,33 @@ restore_bundle() {
 
   echo -e "${YLW}⚠️ Backup preventivo antes de restaurar...${NC}"
   backup_bundle
-  tar -xzf "$file" -C / 2>/dev/null || true
+
+  echo -e "${DIM}Extrayendo:${NC} $file"
+  # --overwrite para que pise configs existentes (restauración real)
+  if ! tar -xzf "$file" -C / --overwrite 2>/dev/null; then
+    echo -e "${RED}ERROR:${NC} No pude extraer el backup. (archivo corrupto o permisos)"
+    return 0
+  fi
+
+  # Re-armar includes/snippets por si el backup viene de otra versión
   ensure_http_conf_maps
   ensure_mothers_include
   write_apply_conf
   rebuild_balancer_files
   rebuild_mothers_upstreams || true
 
-  # si scanner estaba activo, re-escribimos helper por las dudas
-  traffic_scan_write_helper >/dev/null 2>&1 || true
+  # Reload/restart nginx (automático)
+  if command -v systemctl >/dev/null 2>&1; then
+    if nginx -t >/dev/null 2>&1; then
+      systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true
+    else
+      systemctl restart nginx >/dev/null 2>&1 || true
+    fi
+  else
+    nginx_test_reload
+  fi
 
-  nginx_test_reload
-  echo -e "${GRN}✅ Restaurado.${NC}"
+  echo -e "${GRN}✅ Restaurado y recargado Nginx.${NC}"
   return 0
 }
 
@@ -2026,6 +2089,138 @@ nginx_sched_menu() {
       ;;
     5) nginx_sched_disable "restart" ;;
     6) nginx_sched_status "restart" ;;
+    0) return 0 ;;
+    *) echo -e "${YLW}Opción inválida.${NC}" ;;
+  esac
+  return 0
+}
+
+# -------- Limpieza programada (basura / backups viejos / cache) --------
+cleanup_units_names() {
+  echo "backendmgr-cleanup.service backendmgr-cleanup.timer"
+}
+
+cleanup_run_now() {
+  local keep_days="${1:-30}"
+
+  # Backups antiguos (nginx.conf.bak-* y bundles)
+  mkdir -p "$BACKUP_DIR" 2>/dev/null || true
+  find "$BACKUP_DIR" -maxdepth 1 -type f \( -name 'nginx.conf.bak-*' -o -name 'bundle-*.tar.gz' -o -name '*.bak-*' \) -mtime +"$keep_days" -print -delete 2>/dev/null || true
+
+  # Cache apt
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get clean >/dev/null 2>&1 || true
+  fi
+
+  # Journald (si existe)
+  if command -v journalctl >/dev/null 2>&1; then
+    journalctl --vacuum-time="${keep_days}days" >/dev/null 2>&1 || true
+  fi
+
+  # TMP (solo cosas viejas)
+  find /tmp -maxdepth 1 -type f -mtime +"$keep_days" -print -delete 2>/dev/null || true
+
+  return 0
+}
+
+cleanup_install_or_update() {
+  local every="$1"      # ej: 6h | 12h
+  local keep_days="$2"  # ej: 30
+  [[ -n "${every:-}" ]] || return 0
+  [[ -n "${keep_days:-}" ]] || keep_days="30"
+  [[ "$keep_days" =~ ^[0-9]+$ ]] || keep_days="30"
+
+  if ! have_systemd; then
+    echo -e "${YLW}⚠️ No hay systemd/systemctl. No puedo programarlo en este sistema.${NC}"
+    return 0
+  fi
+
+  systemd_write_unit "/etc/systemd/system/backendmgr-cleanup.service" \
+"[Unit]
+Description=BackendMgr cleanup (old backups/cache/logs)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -lc 'keep=${keep_days}; \
+  mkdir -p /etc/nginx/backendmgr-backups 2>/dev/null || true; \
+  find /etc/nginx/backendmgr-backups -maxdepth 1 -type f \\( -name \"nginx.conf.bak-*\" -o -name \"bundle-*.tar.gz\" -o -name \"*.bak-*\" \\) -mtime +${keep} -delete 2>/dev/null || true; \
+  command -v apt-get >/dev/null 2>&1 && apt-get clean >/dev/null 2>&1 || true; \
+  command -v journalctl >/dev/null 2>&1 && journalctl --vacuum-time=${keep}days >/dev/null 2>&1 || true; \
+  find /tmp -maxdepth 1 -type f -mtime +${keep} -delete 2>/dev/null || true'
+"
+
+  systemd_write_unit "/etc/systemd/system/backendmgr-cleanup.timer" \
+"[Unit]
+Description=BackendMgr cleanup timer
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=${every}
+AccuracySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"
+
+  systemd_reload_daemon
+  systemd_enable_start_timer "backendmgr-cleanup.timer"
+
+  echo -e "${GRN}✅ Limpieza programada cada:${NC} ${every}  ${DIM}(borra >${keep_days} días)${NC}"
+  return 0
+}
+
+cleanup_disable() {
+  if ! have_systemd; then
+    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    return 0
+  fi
+  systemd_disable_stop_timer "backendmgr-cleanup.timer"
+  rm -f /etc/systemd/system/backendmgr-cleanup.timer /etc/systemd/system/backendmgr-cleanup.service 2>/dev/null || true
+  systemd_reload_daemon
+  echo -e "${GRN}✅ Limpieza desactivada.${NC}"
+  return 0
+}
+
+cleanup_status() {
+  if ! have_systemd; then
+    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    return 0
+  fi
+  systemctl status backendmgr-cleanup.timer --no-pager 2>/dev/null || true
+  echo
+  systemctl list-timers --all | grep -E 'backendmgr-cleanup' || true
+  return 0
+}
+
+cleanup_menu() {
+  echo -e "${CYA}🧹 Limpieza automática (disco)${NC}"
+  echo -e "${DIM}Borra backups viejos, limpia cache apt y recorta journal. No toca configs actuales.${NC}\n"
+  echo "1) Activar / Cambiar (intervalo + días a conservar)"
+  echo "2) Ejecutar ahora"
+  echo "3) Ver estado"
+  echo "4) Desactivar"
+  echo "0) Volver"
+  read -r -p "Opción: " op
+  echo
+  case "$op" in
+    1)
+      echo -e "${DIM}Ejemplos intervalo: 6h | 12h | 24h${NC}"
+      read -r -p "Intervalo (Enter=12h): " every
+      every="${every:-12h}"
+      read -r -p "Conservar backups/logs (días, Enter=30): " keep
+      keep="${keep:-30}"
+      cleanup_install_or_update "$every" "$keep"
+      ;;
+    2)
+      read -r -p "Conservar backups/logs (días, Enter=30): " keep
+      keep="${keep:-30}"
+      cleanup_run_now "$keep"
+      echo -e "${GRN}✅ Limpieza ejecutada.${NC}"
+      ;;
+    3) cleanup_status ;;
+    4) cleanup_disable ;;
     0) return 0 ;;
     *) echo -e "${YLW}Opción inválida.${NC}" ;;
   esac
