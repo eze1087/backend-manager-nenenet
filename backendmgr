@@ -40,6 +40,19 @@ BACKUP_DIR="/etc/nginx/backendmgr-backups"
 # Logs
 PANEL_LOG="/var/log/backendmgr.panel.log"
 
+# ------------------ DB / ESTADOS (tráfico / mantenimiento) ------------------
+STATE_DIR="/var/lib/backendmgr"
+TRAFFIC_DB_IP="${STATE_DIR}/traffic_ip.db"
+TRAFFIC_DB_BACKEND="${STATE_DIR}/traffic_backend.db"
+RAMREFRESH_LAST_FILE="${STATE_DIR}/ramrefresh.last"
+
+# Defaults defensivos (evita "unbound variable" con set -u)
+: "${STATE_DIR:=/var/lib/backendmgr}"
+: "${TRAFFIC_DB_IP:=${STATE_DIR}/traffic_ip.db}"
+: "${TRAFFIC_DB_BACKEND:=${STATE_DIR}/traffic_backend.db}"
+: "${RAMREFRESH_LAST_FILE:=${STATE_DIR}/ramrefresh.last}"
+mkdir -p "${STATE_DIR}" 2>/dev/null || true
+
 # ------------------ COLORES ------------------
 NC='\033[0m'
 RED='\033[0;31m'
@@ -407,8 +420,8 @@ banner() {
   l1="🚀 ${APP_NAME} v${APP_VER}"
   l2="🟢 Nginx: ${ng_state} | 🌐 Dominios: ${dcount} | 🧱 Backends: ${bcount}"
   l3="👑 Dominio madre activo: ${dom_active}"
-  l4="🏷️  Header: ${HEADER_NAME} | ⚖️ Balance: ${BAL_MODE} (cap ${BAL_CAP})"
-  l5="📊 Stats: ${STATS_LOG}"
+  l4="🏷️  Header: ${HEADER_NAME} | 🚦 RateLimit: $(onoff "${RL_ENABLED}")"
+  l5="📈 Tráfico: log $(traffic_log_state_short) | scanner $(traffic_scan_state_short)"
   l6="💾 Backup: ${bkp}"
   l7="$(mem_used_line)"
   l8="$(cpu_line)"
@@ -444,6 +457,41 @@ validate_domain() { [[ "$1" =~ ^[A-Za-z0-9.-]{3,253}$ ]]; }
 validate_key() { [[ "$1" =~ ^[A-Za-z0-9_.:-]{2,64}$ ]]; }
 validate_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 validate_rate() { [[ "$1" == "0" || "$1" =~ ^[0-9]+[kKmM]$ ]]; }
+
+# ------------------ SYS / BANNER HELPERS ------------------
+cpu_cores() {
+  getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1
+}
+
+onoff() {
+  case "${1:-}" in
+    true|TRUE|1|on|ON|enabled|ENABLED) echo "ON" ;;
+    *) echo "OFF" ;;
+  esac
+}
+
+traffic_log_state_short() {
+  # Requiere read_cfg previo (TRAFFIC_STATS_ENABLED)
+  if [[ "${TRAFFIC_STATS_ENABLED:-false}" == "true" ]]; then echo "ON"; else echo "OFF"; fi
+}
+
+traffic_scan_state_short() {
+  # Requiere read_cfg previo (TRAFFIC_SCAN_ENABLED/MODE/INTERVAL)
+  if [[ "${TRAFFIC_SCAN_ENABLED:-false}" == "true" ]]; then
+    echo "ON (${TRAFFIC_SCAN_MODE:-backend}, ${TRAFFIC_SCAN_INTERVAL:-1min})"
+  else
+    echo "OFF"
+  fi
+}
+
+run_nopipefail() {
+  # Ejecuta un pipeline evitando rc=141 (SIGPIPE) con set -o pipefail.
+  local had_pipefail=0
+  ( set -o pipefail ) 2>/dev/null && had_pipefail=1 || had_pipefail=0
+  if [[ $had_pipefail -eq 1 ]]; then set +o pipefail; fi
+  "$@" || true
+  if [[ $had_pipefail -eq 1 ]]; then set -o pipefail; fi
+}
 
 # ------------------ BALANCER LEGACY (se deja OFF) ------------------
 # (Solo para que no falle nada que lo llame; tu balance real está en "mothers_menu")
@@ -813,8 +861,8 @@ traffic_scan_run_now() {
 
   mkdir -p /var/lib/backendmgr
 
-  local db="$TRAFFIC_DB_BACKEND"
-  [[ "$mode" == "ip" ]] && db="$TRAFFIC_DB_IP"
+  local db="${TRAFFIC_DB_BACKEND:-${STATE_DIR:-/var/lib/backendmgr}/traffic_backend.db}"
+  [[ "$mode" == "ip" ]] && db="${TRAFFIC_DB_IP:-${STATE_DIR:-/var/lib/backendmgr}/traffic_ip.db}"
 
   # Formato DB: key|bytes|req
   if [[ "$mode" == "ip" ]]; then
@@ -1748,7 +1796,9 @@ traffic_stats() {
       if [[ "$op" == "1" ]]; then
         printf "%-18s %-12s %-10s\n" "IP" "TOTAL(MB)" "REQ"
         echo "---------------------------------------------"
-        tail -n "$lines" "$STATS_LOG" | awk -F'|' '
+        {
+          set +o pipefail 2>/dev/null || true
+          tail -n "$lines" "$STATS_LOG" | awk -F'|' '
           {ip=$2; bytes=$7; req[ip]+=1; b[ip]+=bytes}
           END{
             for(i in b){
@@ -1756,10 +1806,14 @@ traffic_stats() {
               printf "%-18s %-12.2f %-10d\n", i, mb, req[i]
             }
           }' | sort -k2 -nr | head -n 30
+          set -o pipefail 2>/dev/null || true
+        } || true
       else
         printf "%-22s %-12s %-10s\n" "BACKEND" "TOTAL(MB)" "REQ"
         echo "---------------------------------------------------"
-        tail -n "$lines" "$STATS_LOG" | awk -F'|' '
+        {
+          set +o pipefail 2>/dev/null || true
+          tail -n "$lines" "$STATS_LOG" | awk -F'|' '
           {be=$4; if(be=="") be="(vacío)"; bytes=$7; req[be]+=1; b[be]+=bytes}
           END{
             for(i in b){
@@ -1767,6 +1821,8 @@ traffic_stats() {
               printf "%-22s %-12.2f %-10d\n", i, mb, req[i]
             }
           }' | sort -k2 -nr | head -n 30
+          set -o pipefail 2>/dev/null || true
+        } || true
       fi
 
       return 0
@@ -2226,147 +2282,3 @@ cleanup_menu() {
   esac
   return 0
 }
-
-maintenance_menu() {
-  if ! have_systemd; then
-    echo -e "${YLW}⚠️ Este menú requiere systemd/systemctl (Ubuntu normal sí lo tiene).${NC}"
-    return 0
-  fi
-
-  echo -e "${CYA}🧰 Mantenimiento programado${NC}\n"
-  echo "1) 🧠 Refresco RAM (drop_caches) programado"
-  echo "2) ⚙️  Nginx: habilitar/deshabilitar arranque con el sistema"
-  echo "3) 🔁 Nginx: programar reload/restart"
-  echo "4) 📋 Ver timers backendmgr"
-  echo "0) Volver"
-  read -r -p "Opción: " op
-  echo
-  case "$op" in
-    1) ramrefresh_menu ;;
-    2) nginx_autostart_menu ;;
-    3) nginx_sched_menu ;;
-    4) systemctl list-timers --all | grep -E 'backendmgr-' || { echo "No hay timers backendmgr."; } ;;
-    0) return 0 ;;
-    *) echo -e "${YLW}Opción inválida.${NC}" ;;
-  esac
-  return 0
-}
-
-# ------------------ SPEEDTEST ------------------
-speedtest_install_if_needed() {
-  if command -v speedtest >/dev/null 2>&1; then
-    return 0
-  fi
-
-  echo -e "${YLW}⚠️ Speedtest no está instalado.${NC}"
-  echo -e "${DIM}Intento instalar speedtest-cli (apt).${NC}"
-
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y >/dev/null 2>&1 || true
-  apt-get install -y speedtest-cli >/dev/null 2>&1 || true
-
-  if command -v speedtest >/dev/null 2>&1; then
-    echo -e "${GRN}✅ Speedtest instalado (speedtest-cli).${NC}"
-    return 0
-  fi
-
-  echo -e "${RED}ERROR:${NC} No pude instalar speedtest-cli."
-  echo -e "${DIM}Probá manualmente:${NC} apt-get update && apt-get install -y speedtest-cli"
-  return 0
-}
-
-speedtest_menu() {
-  echo -e "${CYA}Speedtest del servidor (Ping / Bajada / Subida)${NC}"
-  echo -e "${DIM}Usa speedtest-cli. Puede tardar 20–60s según red.${NC}\n"
-
-  speedtest_install_if_needed
-
-  if ! command -v speedtest >/dev/null 2>&1; then
-    echo -e "${YLW}No se pudo ejecutar speedtest porque no está instalado.${NC}"
-    return 0
-  fi
-
-  echo -e "${DIM}Ejecutando...${NC}\n"
-  speedtest --simple || true
-  return 0
-}
-
-# ------------------ MENU ------------------
-menu() {
-  echo -e "${WHT}📌 MENÚ PRINCIPAL${NC}"
-  echo "  1) 🌐 Dominios madre (crear / editar / eliminar)"
-  echo "  2) ➕ Agregar backend (nombre + IP + puerto)"
-  echo "  3) 📄 Listar backends (backend / IP / puerto)"
-  echo "  4) 🌍 Listar dominios madre (servers)"
-  echo "  5) 🗑️  Eliminar backend"
-  echo "  6) ✅ Healthcheck (HTTP y latencia)"
-  echo "  7) 🧪 Validar conexión (dominio → backend por header)"
-  echo "  8) 🧩 Editar timeouts del dominio madre (manual por nombre)"
-  echo "  9) ⚖️ Balanceo de MADRES (VPS pool por dominio)"
-  echo " 10) 🚦 Limitar ancho de banda por IP o Backend (limit_rate)"
-  echo " 11) 📊 Tráfico por IP / Backend (stats log + scanner)"
-  echo " 12) 🔥 Firewall UFW: abrir puerto (80/443/otro)"
-  echo " 13) 💾 Backup"
-  echo " 14) ♻️  Restaurar backup"
-  echo " 15) ⚙️  Servicios de Nginx (Status/Stop/Start/Reload/Restart)"
-  echo " 16) 🚀 Speedtest (Ping / Bajada / Subida)"
-  echo " 17) 🧰 Mantenimiento programado (RAM / Nginx timers)"
-  echo "  0) 🚪 Salir"
-  echo
-}
-
-main() {
-  need_root
-  ensure_jq
-  ensure_cfg
-  ensure_files
-  read_cfg
-
-  ensure_http_conf_maps
-  ensure_mothers_include
-  write_apply_conf >/dev/null 2>&1 || true
-  rebuild_balancer_files >/dev/null 2>&1 || true
-  rebuild_mothers_upstreams >/dev/null 2>&1 || true
-
-  # ✅ Si el scanner está activado en config, aseguramos helper + timer (sin tocar nada más)
-  if have_systemd && [[ "${TRAFFIC_SCAN_ENABLED}" == "true" ]]; then
-    traffic_scan_write_helper >/dev/null 2>&1 || true
-    # si el timer no existe, lo recreamos
-    if ! systemctl list-unit-files 2>/dev/null | grep -q '^backendmgr-traffic-scan\.timer'; then
-      traffic_scan_write_units "${TRAFFIC_SCAN_INTERVAL}" >/dev/null 2>&1 || true
-      systemd_reload_daemon
-      systemctl enable --now backendmgr-traffic-scan.timer >/dev/null 2>&1 || true
-    fi
-  fi
-
-  while true; do
-    banner
-    menu
-    read -r -p "Opción: " opt
-    echo
-
-    case "$opt" in
-      1) domains_menu ;;
-      2) add_backend; pause ;;
-      3) list_backends; pause ;;
-      4) list_domains; pause ;;
-      5) delete_backend_pick; pause ;;
-      6) healthcheck_all; pause ;;
-      7) validate_connection_test; pause ;;
-      8) create_or_edit_server_http; pause ;;
-      9) mothers_menu; pause ;;
-     10) speed_limit_menu; pause ;;
-     11) traffic_stats; pause ;;
-     12) ufw_open_port; pause ;;
-     13) backup_bundle; pause ;;
-     14) restore_bundle; pause ;;
-     15) nginx_services_menu; pause ;;
-     16) speedtest_menu; pause ;;
-     17) maintenance_menu; pause ;;
-      0) exit 0 ;;
-      *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
-    esac
-  done
-}
-
-main
