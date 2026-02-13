@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_NAME="Backend Manager Nenenet 3.0"
-PANEL_URL="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main/backendmgr"
+PANEL_URL_BASE="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main"
 PANEL_DST="/usr/local/bin/backendmgr"
 
 CFG_DIR="/etc/backendmgr"
@@ -98,10 +98,19 @@ ensure_cfg_keys(){
 
 download_panel(){
   echo "[3/9] Descargando panel..."
-  curl -fsSL "$PANEL_URL" -o /tmp/backendmgr || { echo "ERROR: no pude bajar backendmgr (URL 404 o sin permisos)."; exit 1; }
-  sed -i 's/\r$//' /tmp/backendmgr || true
-  bash -n /tmp/backendmgr || { echo "ERROR: backendmgr tiene errores de sintaxis."; exit 1; }
-  install -m 0755 /tmp/backendmgr "$PANEL_DST"
+  local tmp=/tmp/backendmgr
+  rm -f "$tmp" 2>/dev/null || true
+  # Compat: en el repo puede llamarse backendmgr o backendmgr.sh
+  local ok=0
+  for u in \
+    "${PANEL_URL_BASE}/backendmgr" \
+    "${PANEL_URL_BASE}/backendmgr.sh"; do
+    if curl -fsSL "$u" -o "$tmp"; then ok=1; break; fi
+  done
+  [[ "$ok" -eq 1 ]] || { echo "ERROR: no pude bajar backendmgr (URL 404 o sin permisos)."; exit 1; }
+  sed -i 's/\r$//' "$tmp" || true
+  bash -n "$tmp" || { echo "ERROR: backendmgr tiene errores de sintaxis."; exit 1; }
+  install -m 0755 "$tmp" "$PANEL_DST"
 }
 
 write_snippets_if_missing(){
