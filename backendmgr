@@ -219,6 +219,30 @@ primary_domain_active() {
   echo "(no configurado)"
 }
 
+# -------- Banner helpers (mothers/traffic status) --------
+mothers_status_for_domain() {
+  local dom="${1:-}"
+  [[ -n "$dom" && "$dom" != "(no configurado)" ]] || { echo "N/A"; return 0; }
+  local tf="$(target_file "$dom")"
+  if [[ -f "$tf" ]] && grep -qE 'proxy_pass\s+http://backendmgr_mothers_' "$tf" 2>/dev/null; then
+    echo "ON"
+  else
+    echo "OFF"
+  fi
+}
+
+traffic_status_for_banner() {
+  local log="OFF"
+  [[ "${TRAFFIC_STATS_ENABLED:-false}" == "true" ]] && log="ON"
+  local sc="OFF"
+  if [[ "${TRAFFIC_SCAN_ENABLED:-false}" == "true" ]]; then
+    local mode="${TRAFFIC_SCAN_MODE:-backend}"
+    local every="${TRAFFIC_SCAN_INTERVAL:-1min}"
+    sc="ON (${mode}, ${every})"
+  fi
+  echo "log ${log} | scanner ${sc}"
+}
+
 last_backup_info() {
   local file
   file="$(ls -1t "${BACKUP_DIR}"/bundle-*.tar.gz 2>/dev/null | head -n1 || true)"
@@ -337,13 +361,13 @@ banner() {
   local l1 l2 l3 l4 l5 l6 l7 l8 l9 l10
   l1="🚀 ${APP_NAME} v${APP_VER}"
   l2="🟢 Nginx: ${ng_state} | 🌐 Dominios: ${dcount} | 🧱 Backends: ${bcount}"
-  l3="👑 Dominio madre activo: ${dom_active}"
-  l4="🏷️  Header: ${HEADER_NAME} | ⚖️ Balance: ${BAL_MODE} (cap ${BAL_CAP})"
-  l5="📊 Stats: ${STATS_LOG}"
-  l6="💾 Backup: ${bkp}"
-  l7="$(mem_used_line)"
-  l8="$(cpu_line)"
-  l9="$(net_totals_line)"
+  l3="🌐 Madre: ${dom_active} | 🏷️ Header: ${HEADER_NAME}"
+  l4="🧩 CPU: ${cpu_c}c | load ${cpu_load}"
+  l5="🧠 RAM: ${ram_used} / ${ram_total} (${ram_pct}%) | ♻️ last ${last_ramrefresh}"
+  l6="💽 Disk: ${disk_used} / ${disk_total} (${disk_pct}%)"
+  l7="📡 NET: ⬇️ ${net_rx} | ⬆️ ${net_tx} (desde boot)"
+  l8="⚖️ Madres: $(mothers_status_for_domain \"${dom_active}\") | 📊 Tráfico: $(traffic_status_for_banner)"
+  l9="💾 Backup: ${bkp}"
   l10="$(ramrefresh_last_line)"
 
   local W=62
@@ -869,6 +893,7 @@ traffic_show_from_db() {
   fi
 
   # db: key \t bytes \t req
+  ( set +o pipefail
   awk -F'\t' -v mode="$mode" '
     {
       k=$1; b=$2+0; r=$3+0;
@@ -880,6 +905,7 @@ traffic_show_from_db() {
       }
     }
   ' "$db" | head -n 30
+  ) || true
   return 0
 }
 
@@ -1749,10 +1775,7 @@ restore_bundle() {
 
   echo -e "${YLW}⚠️ Backup preventivo antes de restaurar...${NC}"
   backup_bundle
-  if ! tar -xzf "$file" -C / 2>&1 | tee -a "$PANEL_LOG" >/dev/null; then
-    echo -e "${RED}ERROR:${NC} falló al extraer el backup. Revisá: ${PANEL_LOG}"
-    return 0
-  fi
+  tar -xzf "$file" -C / 2>/dev/null || true
   ensure_http_conf_maps
   ensure_mothers_include
   write_apply_conf
@@ -1762,12 +1785,6 @@ restore_bundle() {
   # si scanner estaba activo, re-escribimos helper por las dudas
   traffic_scan_write_helper >/dev/null 2>&1 || true
 
-  # Recargar nginx automáticamente luego de restaurar
-  if command -v systemctl >/dev/null 2>&1; then
-    # Si nginx está corriendo, restart aplica todo (sin borrar configs)
-    systemctl restart nginx >/dev/null 2>&1 || true
-    systemctl start nginx >/dev/null 2>&1 || true
-  fi
   nginx_test_reload
   echo -e "${GRN}✅ Restaurado.${NC}"
   return 0
