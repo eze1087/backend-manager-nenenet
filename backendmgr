@@ -705,7 +705,7 @@ traffic_scan_install_or_update_units() {
   ' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
 
   # crear units/timer
-  traffic_scan_write_units "$mode" "$every"
+  traffic_scan_write_units "$every"
   systemd_reload_daemon
   systemd_enable_start_timer "backendmgr-traffic-scan.timer"
 
@@ -1749,7 +1749,15 @@ restore_bundle() {
 
   echo -e "${YLW}⚠️ Backup preventivo antes de restaurar...${NC}"
   backup_bundle
-  tar -xzf "$file" -C / 2>/dev/null || true
+
+  echo -e "${DIM}Extrayendo:${NC} $file"
+  if ! tar -xzf "$file" -C /; then
+    echo -e "${RED}❌ Falló la extracción del backup.${NC}"
+    echo -e "${YLW}Tip:${NC} mirá permisos/espacio en disco y que el .tar.gz no esté corrupto."
+    return 0
+  fi
+
+  # Reaplicar snippets y maps (por si el backup era de otra versión)
   ensure_http_conf_maps
   ensure_mothers_include
   write_apply_conf
@@ -1759,12 +1767,16 @@ restore_bundle() {
   # si scanner estaba activo, re-escribimos helper por las dudas
   traffic_scan_write_helper >/dev/null 2>&1 || true
 
-  nginx_test_reload
-  echo -e "${GRN}✅ Restaurado.${NC}"
+  echo -e "${DIM}Testeando nginx...${NC}"
+  if ! nginx -t; then
+    echo -e "${RED}❌ nginx -t falló luego de restaurar.${NC}"
+    echo -e "${YLW}Revisá:${NC} /var/log/nginx/error.log y ${PANEL_LOG}"
+    return 0
+  fi
+  nginx -s reload >/dev/null 2>&1 || true
+  echo -e "${GRN}✅ Restaurado y recargado.${NC}"
   return 0
 }
-
-# ------------------ Servicios Nginx ------------------
 nginx_services_menu() {
   echo -e "${CYA}Servicios Nginx${NC}"
   echo " 1) Status"
