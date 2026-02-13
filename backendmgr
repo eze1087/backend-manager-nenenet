@@ -613,6 +613,85 @@ set_traffic_scan_cfg() {
   return 0
 }
 
+
+# ✅ NUEVO: instala/actualiza units del scanner (service+timer) y los habilita
+traffic_scan_install_or_update_units() {
+  local mode="$1"        # backend | ip
+  local interval="$2"    # 30s | 1min | 5min | 1h
+  [[ -n "${interval:-}" ]] || interval="1min"
+
+  if ! have_systemd; then
+    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    return 0
+  fi
+
+  # escribir helper + units
+  traffic_scan_write_helper_script
+  traffic_scan_write_units "$interval"
+
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl enable --now backendmgr-traffic-scan.timer >/dev/null 2>&1 || true
+
+  # limpiar DB vieja (si existe)
+  rm -f /var/lib/backendmgr/traffic_totals_backend.db /var/lib/backendmgr/traffic_totals_ip.db 2>/dev/null || true
+
+  echo -e "${GRN}✅ Scanner instalado:${NC} modo=${mode} cada ${interval}"
+  return 0
+}
+
+# ✅ NUEVO: recalcula totales desde TODO el log (para "Totales acumulados")
+traffic_scan_rebuild_totals() {
+  local mode="$1"  # backend | ip
+  read_cfg
+
+  mkdir -p /var/lib/backendmgr
+  local db="/var/lib/backendmgr/traffic_totals_${mode}.db"
+  local state="/var/lib/backendmgr/traffic_scan.state"
+
+  [[ -f "$STATS_LOG" ]] || { echo -e "${YLW}No existe todavía: ${STATS_LOG}${NC}"; return 0; }
+
+  # reconstrucción full (puede tardar si el log es grande)
+  if [[ "$mode" == "ip" ]]; then
+    awk -F'|' '{ip=$2; bytes=$7; req[ip]+=1; b[ip]+=bytes} END{for(i in b) printf "%s|%.0f|%d\n", i, b[i], req[i]}' "$STATS_LOG" \
+      | sort -t'|' -k2,2nr > "$db"
+  else
+    awk -F'|' '{be=$4; if(be=="") be="(vacío)"; bytes=$7; req[be]+=1; b[be]+=bytes} END{for(i in b) printf "%s|%.0f|%d\n", i, b[i], req[i]}' "$STATS_LOG" \
+      | sort -t'|' -k2,2nr > "$db"
+  fi
+
+  # actualizar state para que el incremental no reprocece todo de nuevo
+  local inode size
+  inode="$(stat -c '%i' "$STATS_LOG" 2>/dev/null || echo 0)"
+  size="$(stat -c '%s' "$STATS_LOG" 2>/dev/null || echo 0)"
+  printf "inode=%s\npos=%s\n" "$inode" "$size" > "$state"
+
+  return 0
+}
+
+# ✅ NUEVO: ejecuta "rebuild" y muestra top 30
+traffic_scan_run_now() {
+  local mode="$1" # backend | ip
+  [[ "$mode" == "ip" || "$mode" == "backend" ]] || mode="backend"
+
+  traffic_scan_rebuild_totals "$mode"
+
+  local db="/var/lib/backendmgr/traffic_totals_${mode}.db"
+  [[ -f "$db" ]] || { echo -e "${YLW}No hay datos acumulados aún.${NC}"; return 0; }
+
+  echo
+  if [[ "$mode" == "ip" ]]; then
+    printf "%-18s %-12s %-10s\n" "IP" "TOTAL(MB)" "REQ"
+    echo "---------------------------------------------"
+    awk -F'|' '{mb=$2/1024/1024; printf "%-18s %-12.2f %-10d\n",$1,mb,$3}' "$db" | head -n 30
+  else
+    printf "%-22s %-12s %-10s\n" "BACKEND" "TOTAL(MB)" "REQ"
+    echo "---------------------------------------------------"
+    awk -F'|' '{mb=$2/1024/1024; printf "%-22s %-12.2f %-10d\n",$1,mb,$3}' "$db" | head -n 30
+  fi
+
+  return 0
+}
+
 traffic_scan_enable() {
   local mode="$1" interval="$2"
 
