@@ -3,7 +3,6 @@ set -euo pipefail
 
 APP_NAME="Backend Manager Nenenet 3.0"
 PANEL_URL="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main/backendmgr"
-
 PANEL_DST="/usr/local/bin/backendmgr"
 
 CFG_DIR="/etc/backendmgr"
@@ -11,6 +10,9 @@ CFG_FILE="${CFG_DIR}/config.json"
 
 NGX_DIR="/etc/nginx/conf.d/backendmgr"
 SERVERS_DIR="${NGX_DIR}/servers"
+NGX_TARGETS_DIR="${NGX_DIR}/targets"
+NGX_MOTHERS_DIR="${NGX_DIR}/mothers"
+NGX_MOTHERS_UPSTREAMS="${NGX_DIR}/mothers_upstreams.conf"
 
 NGX_BACKENDS_MAP="${NGX_DIR}/backends.map"
 NGX_APPLY_SNIP="${NGX_DIR}/apply.conf"
@@ -24,7 +26,6 @@ NGX_LIMITS_BACKEND="${NGX_DIR}/limits_backend.map"
 NGX_LIMITS_URL="${NGX_DIR}/limits_url.map"
 
 NGX_LOGGING_SNIP="${NGX_DIR}/logging.conf"
-
 BACKUP_DIR="/etc/nginx/backendmgr-backups"
 
 need_root(){ [[ ${EUID:-999} -eq 0 ]] || { echo "ERROR: ejecutá con sudo."; exit 1; }; }
@@ -48,6 +49,13 @@ write_default_cfg(){
   "curl_timeout_seconds": 8,
   "traffic_window_seconds": 60,
   "stats_log_path": "/var/log/nginx/backendmgr.stats.log",
+
+  "traffic_stats_enabled": true,
+  "traffic_stats_since": "",
+  "traffic_scan_enabled": false,
+  "traffic_scan_mode": "backend",
+  "traffic_scan_interval": "1min",
+
   "balance_mode": "off",
   "balance_max_slots_cap": 64
 }
@@ -55,7 +63,11 @@ JSON
 }
 
 make_dirs(){
-  mkdir -p "$CFG_DIR" "$NGX_DIR" "$SERVERS_DIR" "$BACKUP_DIR" /var/log/nginx /var/lib/backendmgr
+  mkdir -p \
+    "$CFG_DIR" \
+    "$NGX_DIR" "$SERVERS_DIR" "$NGX_TARGETS_DIR" "$NGX_MOTHERS_DIR" \
+    "$BACKUP_DIR" /var/log/nginx /var/lib/backendmgr
+
   chmod 700 "$BACKUP_DIR" || true
   [[ -f "$CFG_FILE" ]] || write_default_cfg
 
@@ -67,47 +79,21 @@ make_dirs(){
   [[ -f "$NGX_LIMITS_IP" ]] || : > "$NGX_LIMITS_IP"
   [[ -f "$NGX_LIMITS_BACKEND" ]] || : > "$NGX_LIMITS_BACKEND"
   [[ -f "$NGX_LIMITS_URL" ]] || : > "$NGX_LIMITS_URL"
+
+  [[ -f "$NGX_MOTHERS_UPSTREAMS" ]] || : > "$NGX_MOTHERS_UPSTREAMS"
 }
 
-write_snippets(){
-  cat > "$NGX_LOGGING_SNIP" <<'EOF'
-log_format backendmgr_stats '$time_local|$remote_addr|$host|$http_backend|$upstream_addr|$status|$body_bytes_sent|$request_time|$upstream_response_time|$request';
-EOF
-
-  cat > "$NGX_APPLY_SNIP" <<'EOF'
-# Backend Manager Nenenet 3.0 apply.conf
-access_log /var/log/nginx/backendmgr.stats.log backendmgr_stats;
-EOF
-
-  cat > "$NGX_BALANCER_CONF" <<'EOF'
-# backendmgr balancer.conf (balance OFF)
-map $host $backendmgr_balance { default 0; }
-map $host $backendmgr_slot { default "0"; }
-
-map $backendmgr_slot $balanced_backend_url {
-    default $backend_url;
-    include /etc/nginx/conf.d/backendmgr/balanced.map;
-}
-EOF
-
-  cat > "$NGX_MAIN_INCLUDE" <<EOF
-include ${NGX_LOGGING_SNIP};
-
-# rate-limit zones
-limit_req_zone \$binary_remote_addr zone=backendmgr_req:10m rate=10r/s;
-limit_conn_zone \$binary_remote_addr zone=backendmgr_conn:10m;
-
-# balancer conf
-include ${NGX_BALANCER_CONF};
-
-# speed-limit maps
-map \$remote_addr \$ip_limit_rate { default 0; include ${NGX_LIMITS_IP}; }
-map \$http_backend \$backend_limit_rate { default 0; include ${NGX_LIMITS_BACKEND}; }
-map \$backend_url \$url_limit_rate { default 0; include ${NGX_LIMITS_URL}; }
-
-# servers
-include ${SERVERS_DIR}/*.conf;
-EOF
+ensure_cfg_keys(){
+  local tmp
+  tmp="$(mktemp)"
+  jq '
+    .balance_max_slots_cap = (.balance_max_slots_cap // 64)
+    | .traffic_stats_enabled = (.traffic_stats_enabled // true)
+    | .traffic_stats_since = (.traffic_stats_since // "")
+    | .traffic_scan_enabled = (.traffic_scan_enabled // false)
+    | .traffic_scan_mode = (.traffic_scan_mode // "backend")
+    | .traffic_scan_interval = (.traffic_scan_interval // "1min")
+  ' "$CFG_FILE" > "$tmp" && mv "$tmp" "$CFG_FILE"
 }
 
 download_panel(){
@@ -118,17 +104,139 @@ download_panel(){
   install -m 0755 /tmp/backendmgr "$PANEL_DST"
 }
 
-ensure_cfg_keys(){
-  # asegurar key balance_max_slots_cap aunque el config sea viejo
-  tmp="$(mktemp)"
-  jq '.balance_max_slots_cap = (.balance_max_slots_cap // 64)' "$CFG_FILE" > "$tmp" && mv "$tmp" "$CFG_FILE"
+write_snippets_if_missing(){
+  # logging.conf (no pisar si existe)
+  if [[ ! -s "$NGX_LOGGING_SNIP" ]]; then
+    cat > "$NGX_LOGGING_SNIP" <<'EOF'
+log_format backendmgr_stats '$time_local|$remote_addr|$host|$http_backend|$upstream_addr|$status|$body_bytes_sent|$request_time|$upstream_response_time|$request';
+EOF
+  fi
+
+  # apply.conf (si existe, no lo piso: lo gestiona el panel)
+  if [[ ! -s "$NGX_APPLY_SNIP" ]]; then
+    cat > "$NGX_APPLY_SNIP" <<'EOF'
+# Backend Manager Nenenet 3.0 apply.conf (placeholder)
+access_log /var/log/nginx/backendmgr.stats.log backendmgr_stats;
+EOF
+  fi
+
+  # balancer.conf (legacy, seguro)
+  if [[ ! -s "$NGX_BALANCER_CONF" ]]; then
+    cat > "$NGX_BALANCER_CONF" <<'EOF'
+# backendmgr balancer.conf (legacy balance OFF)
+map $host $backendmgr_balance { default 0; }
+map $host $backendmgr_slot { default "0"; }
+
+map $backendmgr_slot $balanced_backend_url {
+    default $backend_url;
+    include /etc/nginx/conf.d/backendmgr/balanced.map;
+}
+EOF
+  fi
+
+  [[ -f "$NGX_BALANCED_MAP" ]] || : > "$NGX_BALANCED_MAP"
+}
+
+write_backendmgr_conf_full(){
+  cat > "$NGX_MAIN_INCLUDE" <<EOF
+# ${APP_NAME} (http{})
+include ${NGX_LOGGING_SNIP};
+
+# rate-limit zones (valores reales los aplica apply.conf)
+limit_req_zone \$binary_remote_addr zone=backendmgr_req:10m rate=10r/s;
+limit_conn_zone \$binary_remote_addr zone=backendmgr_conn:10m;
+
+# balancer legacy
+include ${NGX_BALANCER_CONF};
+
+# mothers upstreams (si está vacío no pasa nada)
+include ${NGX_MOTHERS_UPSTREAMS};
+
+# speed-limit maps
+map \$remote_addr \$ip_limit_rate { default 0; include ${NGX_LIMITS_IP}; }
+map \$http_backend \$backend_limit_rate { default 0; include ${NGX_LIMITS_BACKEND}; }
+map \$backend_url \$url_limit_rate { default 0; include ${NGX_LIMITS_URL}; }
+
+map \$backend_limit_rate \$nenenet_rate_step1 {
+  default \$backend_limit_rate;
+  0 \$url_limit_rate;
+}
+map \$nenenet_rate_step1 \$nenenet_rate {
+  default \$nenenet_rate_step1;
+  0 \$ip_limit_rate;
+}
+
+# ✅ IMPORTANTÍSIMO: variable usada por targets/*.conf
+map \$backendmgr_balance \$nenenet_backend_url {
+  0 \$backend_url;
+  1 \$balanced_backend_url;
+}
+
+# servers
+include ${SERVERS_DIR}/*.conf;
+EOF
+}
+
+ensure_backendmgr_conf(){
+  # Si no existe: lo creo completo
+  if [[ ! -f "$NGX_MAIN_INCLUDE" ]]; then
+    write_backendmgr_conf_full
+    return 0
+  fi
+
+  # Si existe pero NO define $nenenet_backend_url: lo reparo SIN borrar lo demás
+  if ! grep -q '\$nenenet_backend_url' "$NGX_MAIN_INCLUDE" 2>/dev/null; then
+    backup_file "$NGX_MAIN_INCLUDE"
+    # Insertar mapas antes del include servers, o al final si no lo encuentro
+    awk -v mf="$NGX_MOTHERS_UPSTREAMS" -v lip="$NGX_LIMITS_IP" -v lbe="$NGX_LIMITS_BACKEND" -v lur="$NGX_LIMITS_URL" '
+      BEGIN{done=0}
+      {
+        if(done==0 && $0 ~ /include[ \t]+.*servers\/\*\.conf;/){
+          print ""
+          print "# --- backendmgr auto-fix: maps requeridos ---"
+          print "include " mf ";"
+          print "map $remote_addr $ip_limit_rate { default 0; include " lip "; }"
+          print "map $http_backend $backend_limit_rate { default 0; include " lbe "; }"
+          print "map $backend_url $url_limit_rate { default 0; include " lur "; }"
+          print "map $backend_limit_rate $nenenet_rate_step1 {"
+          print "  default $backend_limit_rate;"
+          print "  0 $url_limit_rate;"
+          print "}"
+          print "map $nenenet_rate_step1 $nenenet_rate {"
+          print "  default $nenenet_rate_step1;"
+          print "  0 $ip_limit_rate;"
+          print "}"
+          print "map $backendmgr_balance $nenenet_backend_url {"
+          print "  0 $backend_url;"
+          print "  1 $balanced_backend_url;"
+          print "}"
+          print ""
+          done=1
+        }
+        print
+      }
+      END{
+        if(done==0){
+          print ""
+          print "# --- backendmgr auto-fix: maps requeridos (append) ---"
+          print "include " mf ";"
+          print "map $remote_addr $ip_limit_rate { default 0; include " lip "; }"
+          print "map $http_backend $backend_limit_rate { default 0; include " lbe "; }"
+          print "map $backend_url $url_limit_rate { default 0; include " lur "; }"
+          print "map $backend_limit_rate $nenenet_rate_step1 { default $backend_limit_rate; 0 $url_limit_rate; }"
+          print "map $nenenet_rate_step1 $nenenet_rate { default $nenenet_rate_step1; 0 $ip_limit_rate; }"
+          print "map $backendmgr_balance $nenenet_backend_url { 0 $backend_url; 1 $balanced_backend_url; }"
+        }
+      }
+    ' "$NGX_MAIN_INCLUDE" > "${NGX_MAIN_INCLUDE}.tmp" && mv "${NGX_MAIN_INCLUDE}.tmp" "$NGX_MAIN_INCLUDE"
+  fi
 }
 
 ensure_nginx_conf_include(){
   local nginx_conf="/etc/nginx/nginx.conf"
   backup_file "$nginx_conf"
 
-  # Si ya tiene el map como tu config, NO lo tocamos (solo include).
+  # Si ya tiene map $http_backend $backend_url, solo aseguro include de backendmgr.conf dentro de http{}
   if grep -q 'map\s\+\$http_backend\s\+\$backend_url' "$nginx_conf"; then
     if ! grep -q '/etc/nginx/conf.d/backendmgr/backendmgr.conf' "$nginx_conf"; then
       awk '
@@ -144,7 +252,7 @@ ensure_nginx_conf_include(){
     return 0
   fi
 
-  # Instalación limpia: crear nginx.conf base compatible
+  # Instalación limpia: nginx.conf mínimo compatible
   cat > "$nginx_conf" <<EOF
 worker_processes auto;
 pid /run/nginx.pid;
@@ -158,7 +266,8 @@ http {
         include ${NGX_BACKENDS_MAP};
     }
 
-    include ${NGX_MAIN_INCLUDE};
+    # Backend Manager Nenenet 3.0
+    include /etc/nginx/conf.d/backendmgr/backendmgr.conf;
 }
 EOF
 }
@@ -195,7 +304,6 @@ run_panel() {
     return 127
   fi
 
-  # CLAVE: no morir por set -e si el panel sale rc!=0
   set +e
   if [[ -r /dev/tty && -w /dev/tty ]]; then
     </dev/tty >/dev/tty 2>&1 "$PANEL"
@@ -256,7 +364,8 @@ main(){
   download_panel
 
   echo "[4/8] Snippets..."
-  write_snippets
+  write_snippets_if_missing
+  ensure_backendmgr_conf
 
   echo "[5/8] nginx.conf include..."
   ensure_nginx_conf_include
