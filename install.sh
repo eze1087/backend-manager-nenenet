@@ -36,6 +36,26 @@ backup_file(){
   [[ -e "$f" ]] && cp -a "$f" "${BACKUP_DIR}/$(basename "$f").bak-$(date +%Y%m%d-%H%M%S)" || true
 }
 
+prune_backups(){
+  # Limpieza simple para que los .bak no llenen el disco
+  # - borra nginx.conf.bak-* y nginx.sbin.bak-* de más de 30 días
+  # - y conserva como máximo los últimos 60 (por si querés volver atrás)
+  local days="${BACKENDMGR_PRUNE_DAYS:-30}"
+  local keep="${BACKENDMGR_KEEP_BAKS:-60}"
+  mkdir -p "$BACKUP_DIR" 2>/dev/null || true
+
+  # borrar por antigüedad
+  find "$BACKUP_DIR" -maxdepth 1 -type f \( -name 'nginx.conf.bak-*' -o -name 'nginx.sbin.bak-*' -o -name 'nginx.conf.bak_*' \) -mtime "+${days}" -delete 2>/dev/null || true
+
+  # limitar cantidad total
+  local cnt
+  cnt=$(ls -1t "$BACKUP_DIR"/nginx.conf.bak-* "$BACKUP_DIR"/nginx.sbin.bak-* 2>/dev/null | wc -l | tr -d ' ' || true)
+  if [[ "${cnt:-0}" =~ ^[0-9]+$ ]] && (( cnt > keep )); then
+    ls -1t "$BACKUP_DIR"/nginx.conf.bak-* "$BACKUP_DIR"/nginx.sbin.bak-* 2>/dev/null | tail -n "$((cnt-keep))" | xargs -r rm -f 2>/dev/null || true
+  fi
+}
+
+
 write_default_cfg(){
   mkdir -p "$CFG_DIR"
   cat > "$CFG_FILE" <<'JSON'
@@ -375,6 +395,8 @@ main(){
   nginx -s reload >/dev/null 2>&1 || true
 
   install_wrapper_nginx
+
+  prune_backups || true
 
   echo "[8/8] ✅ Listo. Abrir panel con: nginx  (o sudo nginx)"
 }
