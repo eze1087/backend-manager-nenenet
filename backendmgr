@@ -40,6 +40,13 @@ BACKUP_DIR="/etc/nginx/backendmgr-backups"
 # Logs
 PANEL_LOG="/var/log/backendmgr.panel.log"
 
+# ------------------ STATE (traffic scanner DB) ------------------
+STATE_DIR="/var/lib/backendmgr"
+TRAFFIC_DB_IP="${STATE_DIR}/traffic_ip.db"
+TRAFFIC_DB_BACKEND="${STATE_DIR}/traffic_backend.db"
+TRAFFIC_DB_LAST_RUN="${STATE_DIR}/traffic_last_run"
+
+
 # ------------------ COLORES ------------------
 NC='\033[0m'
 RED='\033[0;31m'
@@ -136,6 +143,13 @@ ensure_files() {
     "$NGX_DIR" "$SERVERS_DIR" \
     "$NGX_MOTHERS_DIR" "$NGX_TARGETS_DIR" \
     "$BACKUP_DIR" /var/log/nginx /var/lib/backendmgr
+
+  # state files for traffic scanner / totals
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  [[ -f "$TRAFFIC_DB_IP" ]] || : > "$TRAFFIC_DB_IP"
+  [[ -f "$TRAFFIC_DB_BACKEND" ]] || : > "$TRAFFIC_DB_BACKEND"
+  [[ -f "$TRAFFIC_DB_LAST_RUN" ]] || : > "$TRAFFIC_DB_LAST_RUN"
+
   chmod 700 "$BACKUP_DIR" || true
 
   [[ -f "$NGX_BACKENDS_MAP" ]] || : > "$NGX_BACKENDS_MAP"
@@ -707,7 +721,8 @@ BASH
 }
 
 traffic_scan_write_units() {
-  local every="$1" # systemd interval: 30s | 1min | 10min | 2h etc.
+  local mode="${1:-backend}"
+  local every="${2:-1min}"
 
   traffic_scan_write_helper
 
@@ -1748,6 +1763,7 @@ traffic_stats() {
       if [[ "$op" == "1" ]]; then
         printf "%-18s %-12s %-10s\n" "IP" "TOTAL(MB)" "REQ"
         echo "---------------------------------------------"
+        ( set +o pipefail;
         tail -n "$lines" "$STATS_LOG" | awk -F'|' '
           {ip=$2; bytes=$7; req[ip]+=1; b[ip]+=bytes}
           END{
@@ -1755,10 +1771,11 @@ traffic_stats() {
               mb=b[i]/1024/1024;
               printf "%-18s %-12.2f %-10d\n", i, mb, req[i]
             }
-          }' | sort -k2 -nr | head -n 30
+          }' | sort -k2 -nr | head -n 30 ) || true
       else
         printf "%-22s %-12s %-10s\n" "BACKEND" "TOTAL(MB)" "REQ"
         echo "---------------------------------------------------"
+        ( set +o pipefail;
         tail -n "$lines" "$STATS_LOG" | awk -F'|' '
           {be=$4; if(be=="") be="(vacío)"; bytes=$7; req[be]+=1; b[be]+=bytes}
           END{
@@ -1766,7 +1783,7 @@ traffic_stats() {
               mb=b[i]/1024/1024;
               printf "%-22s %-12.2f %-10d\n", i, mb, req[i]
             }
-          }' | sort -k2 -nr | head -n 30
+          }' | sort -k2 -nr | head -n 30 ) || true
       fi
 
       return 0
