@@ -336,7 +336,7 @@ install_wrapper_nginx(){
     mv "$SBIN" "$REAL"
   fi
 
-  cat > "$SBIN" <<'WRAP'
+cat > "$SBIN" <<'WRAP'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -358,6 +358,7 @@ run_panel() {
     return 127
   fi
 
+  # no morir por set -e si el panel sale rc!=0
   set +e
   if [[ -r /dev/tty && -w /dev/tty ]]; then
     </dev/tty >/dev/tty 2>&1 "$PANEL"
@@ -370,10 +371,13 @@ run_panel() {
 
   log "PANEL_EXIT rc=$rc"
 
-  if [[ -r /dev/tty && -w /dev/tty ]]; then
-    echo "" >/dev/tty
-    echo "⚠️ El panel terminó (rc=$rc). Log: $LOG" >/dev/tty
-    read -r -p "Enter para volver..." _ </dev/tty || true
+  # ✅ SOLO avisar si hubo error (rc != 0)
+  if [[ "${rc:-0}" -ne 0 ]]; then
+    if [[ -r /dev/tty && -w /dev/tty ]]; then
+      echo "" >/dev/tty
+      echo "⚠️ El panel terminó (rc=$rc). Log: $LOG" >/dev/tty
+      read -r -p "Enter para volver..." _ </dev/tty || true
+    fi
   fi
 
   return "$rc"
