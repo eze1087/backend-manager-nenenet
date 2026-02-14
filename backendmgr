@@ -404,15 +404,34 @@ ramrefresh_last_line() {
   fi
 }
 
-# imprime una línea dentro del recuadro con ancho fijo, sin que se rompa
+# imprime una línea dentro del recuadro con ancho fijo (respetando emojis/ancho real)
+disp_width() {
+  python3 -c 'import sys,wcwidth; s=sys.argv[1]; print(sum((w:=wcwidth.wcwidth(ch)) if w>0 else 0 for ch in s))' "$1" 2>/dev/null     || echo "${#1}"
+}
+
+disp_fit() {
+  python3 -c 'import sys,wcwidth; s=sys.argv[1]; W=int(sys.argv[2]); out=""; w=0
+for ch in s:
+  cw=wcwidth.wcwidth(ch)
+  if cw<0: cw=0
+  if w+cw>W: break
+  out+=ch; w+=cw
+out += " "*(W-w)
+print(out)' "$1" "$2" 2>/dev/null || {
+    # Fallback: recorte/pad por largo de bytes
+    local s="$1" W="$2"
+    s="${s:0:$W}"
+    printf "%-*s" "$W" "$s"
+  }
+}
+
 box_line() {
   local w="${1:-62}"
   shift || true
   local text="$*"
-  if [[ ${#text} -gt $w ]]; then
-    text="${text:0:$w}"
-  fi
-  printf "║ %-*s ║\n" "$w" "$text"
+  local fitted
+  fitted="$(disp_fit "$text" "$w")"
+  printf "║ %s ║\n" "$fitted"
 }
 
 nginx_test_reload() {
@@ -455,7 +474,7 @@ banner() {
 
   local W=62
   local n
-  for n in "${#l1}" "${#l2}" "${#l3}" "${#l4}" "${#l5}" "${#l6}" "${#l7}" "${#l8}" "${#l9}" "${#l10}" "${#l11}"; do
+  for n in $(disp_width "$l1") $(disp_width "$l2") $(disp_width "$l3") $(disp_width "$l4") $(disp_width "$l5") $(disp_width "$l6") $(disp_width "$l7") $(disp_width "$l8") $(disp_width "$l9") $(disp_width "$l10") $(disp_width "$l11"); do
     (( n > W )) && W="$n"
   done
   (( W < 62 )) && W=62
