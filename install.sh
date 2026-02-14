@@ -4,6 +4,8 @@ set -euo pipefail
 APP_NAME="Backend Manager Nenenet 3.0"
 PANEL_URL="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main/backendmgr"
 PANEL_DST="/usr/local/bin/backendmgr"
+UNINSTALL_URL="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main/uninstall.sh"
+UNINSTALL_DST="/usr/local/bin/backendmgr-uninstall"
 
 CFG_DIR="/etc/backendmgr"
 CFG_FILE="${CFG_DIR}/config.json"
@@ -29,6 +31,20 @@ NGX_LOGGING_SNIP="${NGX_DIR}/logging.conf"
 BACKUP_DIR="/etc/nginx/backendmgr-backups"
 
 need_root(){ [[ ${EUID:-999} -eq 0 ]] || { echo "ERROR: ejecutá con sudo."; exit 1; }; }
+
+# Permite desinstalar usando el mismo entrypoint:
+#   curl -fsSL <install.sh> | sudo bash -s uninstall
+if [[ "${1:-}" == "uninstall" ]]; then
+  echo "[UNINSTALL] Ejecutando desinstalación..."
+  if [[ -x "${UNINSTALL_DST}" ]]; then
+    "${UNINSTALL_DST}" || true
+    exit 0
+  fi
+  curl -fsSL "${UNINSTALL_URL}" | bash
+  exit 0
+fi
+
+
 
 backup_file(){
   local f="$1"
