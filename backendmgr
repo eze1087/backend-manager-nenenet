@@ -203,6 +203,29 @@ read_cfg() {
   [[ "$BAL_CAP" =~ ^[0-9]+$ ]] || BAL_CAP="64"
 }
 
+
+# ---------- Helpers tráfico (banner / opción 11) ----------
+traffic_log_state_short() {
+  # ON/OFF (+ desde)
+  if [[ "${TRAFFIC_STATS_ENABLED:-false}" == "true" ]]; then
+    if [[ -n "${TRAFFIC_STATS_SINCE:-}" && "${TRAFFIC_STATS_SINCE:-}" != "null" ]]; then
+      echo "ON (desde ${TRAFFIC_STATS_SINCE})"
+    else
+      echo "ON"
+    fi
+  else
+    echo "OFF"
+  fi
+}
+
+traffic_scan_state_short() {
+  if [[ "${TRAFFIC_SCAN_ENABLED:-false}" == "true" ]]; then
+    echo "ON (${TRAFFIC_SCAN_MODE:-backend}, ${TRAFFIC_SCAN_INTERVAL:-1min})"
+  else
+    echo "OFF"
+  fi
+}
+
 # ---------- Helpers banner ----------
 nginx_state() {
   if command -v systemctl >/dev/null 2>&1; then
@@ -421,9 +444,9 @@ banner() {
   l1="🚀 ${APP_NAME} v${APP_VER}"
   l2="🟢 Nginx: ${ng_state} | 🌐 Dominios: ${dcount} | 🧱 Backends: ${bcount}"
   l3="👑 Dominio madre activo: ${dom_active}"
-  l4="🏷️  Header: ${HEADER_NAME} | ⚖️ Balance: ${BAL_MODE} (cap ${BAL_CAP})"
-  l5="📊 Stats: ${STATS_LOG}"
-  l6="💾 Backup: ${bkp}"
+  l4="🏷️  Header: ${HEADER_NAME} | 📈 Tráfico: $(traffic_log_state_short) | 🔎 Scanner: $(traffic_scan_state_short)"
+  l5="💾 Backup: ${bkp}"
+  l6=""
   l7="$(mem_used_line)"
   l8="$(cpu_line)"
   l9="$(disk_usage_line)"
@@ -444,7 +467,7 @@ banner() {
   box_line "$W" "$l3"
   box_line "$W" "$l4"
   box_line "$W" "$l5"
-  box_line "$W" "$l6"
+  [[ -n "${l6:-}" ]] && box_line "$W" "$l6"
   box_line "$W" "$l7"
   box_line "$W" "$l8"
   box_line "$W" "$l9"
@@ -965,7 +988,7 @@ traffic_show_from_db() {
         printf "%-22s %-12.2f %-10d\n", k, mb, r
       }
     }
-  ' "$db" | head -n 30
+  ' "$db" | head -n 30 || true
   return 0
 }
 
