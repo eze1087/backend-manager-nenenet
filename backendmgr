@@ -40,13 +40,6 @@ BACKUP_DIR="/etc/nginx/backendmgr-backups"
 # Logs
 PANEL_LOG="/var/log/backendmgr.panel.log"
 
-# ------------------ STATE (traffic scanner DB) ------------------
-STATE_DIR="/var/lib/backendmgr"
-TRAFFIC_DB_IP="${STATE_DIR}/traffic_ip.db"
-TRAFFIC_DB_BACKEND="${STATE_DIR}/traffic_backend.db"
-TRAFFIC_DB_LAST_RUN="${STATE_DIR}/traffic_last_run"
-
-
 # ------------------ COLORES ------------------
 NC='\033[0m'
 RED='\033[0;31m'
@@ -143,13 +136,6 @@ ensure_files() {
     "$NGX_DIR" "$SERVERS_DIR" \
     "$NGX_MOTHERS_DIR" "$NGX_TARGETS_DIR" \
     "$BACKUP_DIR" /var/log/nginx /var/lib/backendmgr
-
-  # state files for traffic scanner / totals
-  mkdir -p "$STATE_DIR" 2>/dev/null || true
-  [[ -f "$TRAFFIC_DB_IP" ]] || : > "$TRAFFIC_DB_IP"
-  [[ -f "$TRAFFIC_DB_BACKEND" ]] || : > "$TRAFFIC_DB_BACKEND"
-  [[ -f "$TRAFFIC_DB_LAST_RUN" ]] || : > "$TRAFFIC_DB_LAST_RUN"
-
   chmod 700 "$BACKUP_DIR" || true
 
   [[ -f "$NGX_BACKENDS_MAP" ]] || : > "$NGX_BACKENDS_MAP"
@@ -203,16 +189,11 @@ read_cfg() {
   [[ "$BAL_CAP" =~ ^[0-9]+$ ]] || BAL_CAP="64"
 }
 
-
-# ---------- Helpers tráfico (banner / opción 11) ----------
+# -------- Estado corto (banner) --------
 traffic_log_state_short() {
-  # ON/OFF (+ desde)
+  # requiere read_cfg ya ejecutado
   if [[ "${TRAFFIC_STATS_ENABLED:-false}" == "true" ]]; then
-    if [[ -n "${TRAFFIC_STATS_SINCE:-}" && "${TRAFFIC_STATS_SINCE:-}" != "null" ]]; then
-      echo "ON (desde ${TRAFFIC_STATS_SINCE})"
-    else
-      echo "ON"
-    fi
+    echo "ON"
   else
     echo "OFF"
   fi
@@ -220,11 +201,14 @@ traffic_log_state_short() {
 
 traffic_scan_state_short() {
   if [[ "${TRAFFIC_SCAN_ENABLED:-false}" == "true" ]]; then
-    echo "ON (${TRAFFIC_SCAN_MODE:-backend}, ${TRAFFIC_SCAN_INTERVAL:-1min})"
+    local mode="${TRAFFIC_SCAN_MODE:-backend}"
+    local intv="${TRAFFIC_SCAN_INTERVAL:-1min}"
+    echo "ON (${mode}, ${intv})"
   else
     echo "OFF"
   fi
 }
+
 
 # ---------- Helpers banner ----------
 nginx_state() {
@@ -238,23 +222,65 @@ nginx_state() {
 backend_lines() { grep -E '^\s*"[A-Za-z0-9_.:-]+"\s+"http://' "$NGX_BACKENDS_MAP" 2>/dev/null || true; }
 server_files() { ls -1 "${SERVERS_DIR}"/*.conf 2>/dev/null || true; }
 
+# -------- Dominios helpers (banner / primary) --------
+domain_names() {
+  # Devuelve lista de server_name (uno por línea)
+  local f dom
+  while IFS= read -r f; do
+    [[ -f "$f" ]] || continue
+    dom="$(grep -E '^\s*server_name\s+' "$f" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
+    [[ -n "${dom:-}" ]] && echo "$dom"
+  done < <(server_files)
+}
+
+domain_exists() {
+  local d="$1"
+  domain_names | grep -qxF "$d"
+}
+
+domains_compact() {
+  # Lista compacta para banner: cpu1..., cpu2..., +N
+  local max="${1:-52}"
+  mapfile -t ds < <(domain_names)
+  [[ "${#ds[@]}" -gt 0 ]] || { echo "(no configurado)"; return 0; }
+  local out="" i=0 more=0
+  for d in "${ds[@]}"; do
+    ((i++))
+    if [[ -z "$out" ]]; then
+      out="$d"
+    else
+      if (( ${#out} + 2 + ${#d} <= max )); then
+        out="${out}, ${d}"
+      else
+        more=$(( ${#ds[@]} - i + 1 ))
+        break
+      fi
+    fi
+  done
+  if (( more > 0 )); then
+    out="${out}, +${more}"
+  fi
+  echo "$out"
+}
+
 backend_count() { backend_lines | wc -l | tr -d ' '; }
 domain_count() { server_files | wc -l | tr -d ' '; }
 
 primary_domain_active() {
+  # Usa PRIMARY_DOMAIN si existe Y tiene server creado; sino cae al primero disponible.
   if [[ -n "${PRIMARY_DOMAIN:-}" && "${PRIMARY_DOMAIN}" != "null" ]]; then
-    echo "$PRIMARY_DOMAIN"; return 0
+    if domain_exists "$PRIMARY_DOMAIN"; then
+      echo "$PRIMARY_DOMAIN"; return 0
+    fi
   fi
 
-  local f dom
-  f="$(server_files | head -n1 || true)"
-  if [[ -n "$f" && -f "$f" ]]; then
-    dom="$(grep -E '^\s*server_name\s+' "$f" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
-    [[ -n "${dom:-}" ]] && { echo "$dom"; return 0; }
-  fi
+  local dom
+  dom="$(domain_names | head -n1 || true)"
+  [[ -n "${dom:-}" ]] && { echo "$dom"; return 0; }
 
   echo "(no configurado)"
 }
+
 
 last_backup_info() {
   local file
@@ -404,34 +430,15 @@ ramrefresh_last_line() {
   fi
 }
 
-# imprime una línea dentro del recuadro con ancho fijo (respetando emojis/ancho real)
-disp_width() {
-  python3 -c 'import sys,wcwidth; s=sys.argv[1]; print(sum((w:=wcwidth.wcwidth(ch)) if w>0 else 0 for ch in s))' "$1" 2>/dev/null     || echo "${#1}"
-}
-
-disp_fit() {
-  python3 -c 'import sys,wcwidth; s=sys.argv[1]; W=int(sys.argv[2]); out=""; w=0
-for ch in s:
-  cw=wcwidth.wcwidth(ch)
-  if cw<0: cw=0
-  if w+cw>W: break
-  out+=ch; w+=cw
-out += " "*(W-w)
-print(out)' "$1" "$2" 2>/dev/null || {
-    # Fallback: recorte/pad por largo de bytes
-    local s="$1" W="$2"
-    s="${s:0:$W}"
-    printf "%-*s" "$W" "$s"
-  }
-}
-
+# imprime una línea dentro del recuadro con ancho fijo, sin que se rompa
 box_line() {
   local w="${1:-62}"
   shift || true
   local text="$*"
-  local fitted
-  fitted="$(disp_fit "$text" "$w")"
-  printf "║ %s ║\n" "$fitted"
+  if [[ ${#text} -gt $w ]]; then
+    text="${text:0:$w}"
+  fi
+  printf "║ %-*s ║\n" "$w" "$text"
 }
 
 nginx_test_reload() {
@@ -459,22 +466,22 @@ banner() {
   dcount="$(domain_count)"
   bkp="$(last_backup_info)"
 
-  local l1 l2 l3 l4 l5 l6 l7 l8 l9 l10
+  local l1 l2 l3 l4 l5 l6 l7 l8 l9 l10 l11
   l1="🚀 ${APP_NAME} v${APP_VER}"
   l2="🟢 Nginx: ${ng_state} | 🌐 Dominios: ${dcount} | 🧱 Backends: ${bcount}"
-  l3="👑 Dominio madre activo: ${dom_active}"
-  l4="🏷️  Header: ${HEADER_NAME} | 📈 Tráfico: $(traffic_log_state_short) | 🔎 Scanner: $(traffic_scan_state_short)"
-  l5="💾 Backup: ${bkp}"
-  l6=""
+  l3="👑 Dominios madre: $(domains_compact 52)"
+  l4="⭐ Principal: ${dom_active} | 🏷️ Header: ${HEADER_NAME}"
+  l5="📈 Tráfico: $(traffic_log_state_short) | 🔎 Scanner: $(traffic_scan_state_short)"
+  l6="💾 Backup: ${bkp}"
   l7="$(mem_used_line)"
   l8="$(cpu_line)"
   l9="$(disk_usage_line)"
   l10="$(net_totals_line)"
-  l11="$(ramrefresh_last_line)"
+  l11="🧹 Último refresco RAM: $(ramrefresh_last_line)"
 
   local W=62
   local n
-  for n in $(disp_width "$l1") $(disp_width "$l2") $(disp_width "$l3") $(disp_width "$l4") $(disp_width "$l5") $(disp_width "$l6") $(disp_width "$l7") $(disp_width "$l8") $(disp_width "$l9") $(disp_width "$l10") $(disp_width "$l11"); do
+  for n in "${#l1}" "${#l2}" "${#l3}" "${#l4}" "${#l5}" "${#l6}" "${#l7}" "${#l8}" "${#l9}" "${#l10}" "${#l11}"; do
     (( n > W )) && W="$n"
   done
   (( W < 62 )) && W=62
@@ -486,7 +493,7 @@ banner() {
   box_line "$W" "$l3"
   box_line "$W" "$l4"
   box_line "$W" "$l5"
-  [[ -n "${l6:-}" ]] && box_line "$W" "$l6"
+  box_line "$W" "$l6"
   box_line "$W" "$l7"
   box_line "$W" "$l8"
   box_line "$W" "$l9"
@@ -496,7 +503,31 @@ banner() {
   echo
 }
 
-validate_domain() { [[ "$1" =~ ^[A-Za-z0-9.-]{3,253}$ ]]; }
+normalize_domain() {
+  local d="${1:-}"
+  d="${d,,}"
+  d="${d//[[:space:]]/}"
+  # colapsar puntos repetidos y quitar puntos al inicio/fin
+  d="$(echo "$d" | sed -E 's/^\.+//; s/\.+$//; s/\.+/./g')"
+  echo "$d"
+}
+
+# Dominio válido tipo: cpu3.nenenet.com.ar (sin "..", sin espacios)
+normalize_domain() {
+  local d="${1:-}"
+  d="${d,,}"
+  d="${d//[[:space:]]/}"
+  # colapsar puntos repetidos y quitar puntos al inicio/fin
+  d="$(echo "$d" | sed -E 's/^\.+//; s/\.+$//; s/\.+/./g')"
+  echo "$d"
+}
+
+# Dominio válido tipo: cpu3.nenenet.com.ar (sin "..", sin espacios)
+validate_domain() {
+  local d
+  d="$(normalize_domain "${1:-}")"
+  [[ "$d" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$ ]]
+}
 validate_key() { [[ "$1" =~ ^[A-Za-z0-9_.:-]{2,64}$ ]]; }
 validate_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 validate_rate() { [[ "$1" == "0" || "$1" =~ ^[0-9]+[kKmM]$ ]]; }
@@ -763,8 +794,7 @@ BASH
 }
 
 traffic_scan_write_units() {
-  local mode="${1:-backend}"
-  local every="${2:-1min}"
+  local every="$1" # systemd interval: 30s | 1min | 10min | 2h etc.
 
   traffic_scan_write_helper
 
@@ -1007,7 +1037,7 @@ traffic_show_from_db() {
         printf "%-22s %-12.2f %-10d\n", k, mb, r
       }
     }
-  ' "$db" | head -n 30 || true
+  ' "$db" | head -n 30
   return 0
 }
 
@@ -1342,7 +1372,7 @@ pick_domain() {
   local i=0
   for f in "${files[@]}"; do
     i=$((i+1))
-    dom="$(grep -E '^\s*server_name\s+' "$f" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
+    dom="$(grep -E '^\s*server_name\s+' "$f" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' | awk '{print $1}' || true)"
     printf "%-3s) %s\n" "$i" "$dom"
   done
   echo
@@ -1350,7 +1380,7 @@ pick_domain() {
   [[ "$n" =~ ^[0-9]+$ ]] || return 1
   (( n>=1 && n<=${#files[@]} )) || return 1
   PICKED_DOMAIN_FILE="${files[$((n-1))]}"
-  PICKED_DOMAIN="$(grep -E '^\s*server_name\s+' "$PICKED_DOMAIN_FILE" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
+  PICKED_DOMAIN="$(grep -E '^\s*server_name\s+' "$PICKED_DOMAIN_FILE" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' | awk '{print $1}' || true)"
   [[ -n "${PICKED_DOMAIN:-}" ]] || return 1
   return 0
 }
@@ -1424,6 +1454,7 @@ add_domain_auto_create() {
   echo -e "${CYA}Agregar dominio madre (AUTO crea server)${NC}"
   echo -e "${DIM}Ejemplo: cpu2.nenenet.site${NC}\n"
   read -r -p "Dominio madre nuevo: " dom
+  dom="$(normalize_domain "$dom")"
   validate_domain "$dom" || { echo -e "${RED}Dominio inválido.${NC}"; return 0; }
 
   create_server_for_domain "$dom" "300s" "600s" "600s"
@@ -1442,6 +1473,7 @@ create_or_edit_server_http() {
   echo -e "${DIM}Enter = default 300/600/600.${NC}\n"
 
   read -r -p "Dominio (ej: cpu2.elnene.site): " dom
+  dom="$(normalize_domain "$dom")"
   validate_domain "$dom" || { echo -e "${RED}Dominio inválido.${NC}"; return 0; }
 
   read -r -p "proxy_connect_timeout (Enter=300s): " cto
@@ -1468,7 +1500,7 @@ list_domains() {
   local idx=0
   for f in "${files[@]}"; do
     idx=$((idx+1))
-    dom="$(grep -E '^\s*server_name\s+' "$f" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/')"
+    dom="$(grep -E '^\s*server_name\s+' "$f" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' | awk '{print $1}')"
     echo "$idx) $dom"
   done
   return 0
@@ -1483,7 +1515,7 @@ pick_domain_for_manage() {
   local i=0
   for f in "${files[@]}"; do
     i=$((i+1))
-    dom="$(grep -E '^\s*server_name\s+' "$f" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
+    dom="$(grep -E '^\s*server_name\s+' "$f" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' | awk '{print $1}' || true)"
     printf "%-3s) %s\n" "$i" "$dom"
   done
   echo
@@ -1492,7 +1524,7 @@ pick_domain_for_manage() {
   (( n>=1 && n<=${#files[@]} )) || return 1
 
   PICKED_DOMAIN_FILE="${files[$((n-1))]}"
-  PICKED_DOMAIN="$(grep -E '^\s*server_name\s+' "$PICKED_DOMAIN_FILE" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
+  PICKED_DOMAIN="$(grep -E '^\s*server_name\s+' "$PICKED_DOMAIN_FILE" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' | awk '{print $1}' || true)"
   [[ -n "${PICKED_DOMAIN:-}" ]] || return 1
   return 0
 }
@@ -1550,6 +1582,19 @@ delete_domain_pick() {
   return 0
 }
 
+
+set_primary_domain_pick() {
+  echo -e "${CYA}Elegir dominio madre activo (primary)${NC}"
+  echo -e "${DIM}Afecta el banner y las pruebas de conexión. No borra nada.${NC}
+"
+  pick_domain_for_manage || return 0
+  # Guardar en config.json
+  jq --arg dom "$PICKED_DOMAIN" '.primary_domain = $dom' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
+  read_cfg
+  echo -e "${GRN}✅ Dominio madre activo:${NC} ${PICKED_DOMAIN}"
+  return 0
+}
+
 domains_menu() {
   while true; do
     echo -e "${CYA}Dominios madre${NC}"
@@ -1557,6 +1602,7 @@ domains_menu() {
     echo " 2) ✏️  Editar dominio madre (elegir de lista)"
     echo " 3) 🗑️  Eliminar dominio madre (elegir de lista)"
     echo " 4) 📃 Listar dominios madre"
+    echo " 5) 👑 Setear dominio madre activo (primary)"
     echo " 0) Volver"
     echo
     read -r -p "Opción: " op
@@ -1566,6 +1612,7 @@ domains_menu() {
       2) edit_domain_pick; pause ;;
       3) delete_domain_pick; pause ;;
       4) list_domains; pause ;;
+      5) set_primary_domain_pick; pause ;;
       0) return 0 ;;
       *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
     esac
@@ -1805,7 +1852,6 @@ traffic_stats() {
       if [[ "$op" == "1" ]]; then
         printf "%-18s %-12s %-10s\n" "IP" "TOTAL(MB)" "REQ"
         echo "---------------------------------------------"
-        ( set +o pipefail;
         tail -n "$lines" "$STATS_LOG" | awk -F'|' '
           {ip=$2; bytes=$7; req[ip]+=1; b[ip]+=bytes}
           END{
@@ -1813,11 +1859,10 @@ traffic_stats() {
               mb=b[i]/1024/1024;
               printf "%-18s %-12.2f %-10d\n", i, mb, req[i]
             }
-          }' | sort -k2 -nr | head -n 30 ) || true
+          }' | sort -k2 -nr | head -n 30
       else
         printf "%-22s %-12s %-10s\n" "BACKEND" "TOTAL(MB)" "REQ"
         echo "---------------------------------------------------"
-        ( set +o pipefail;
         tail -n "$lines" "$STATS_LOG" | awk -F'|' '
           {be=$4; if(be=="") be="(vacío)"; bytes=$7; req[be]+=1; b[be]+=bytes}
           END{
@@ -1825,7 +1870,7 @@ traffic_stats() {
               mb=b[i]/1024/1024;
               printf "%-22s %-12.2f %-10d\n", i, mb, req[i]
             }
-          }' | sort -k2 -nr | head -n 30 ) || true
+          }' | sort -k2 -nr | head -n 30
       fi
 
       return 0
@@ -1864,8 +1909,8 @@ backup_bundle() {
   tar -czf "$out" \
     /etc/nginx/nginx.conf \
     /etc/nginx/conf.d/backendmgr \
-    /etc/backendmgr \
-    /var/lib/backendmgr 2>/dev/null || true
+    /etc/backendmgr 2>/dev/null || true
+  # Nota: /var/lib/backendmgr NO se incluye para no arrastrar contadores/DB de tráfico.
   echo -e "${GRN}✅ Backup creado:${NC} $out"
   return 0
 }
