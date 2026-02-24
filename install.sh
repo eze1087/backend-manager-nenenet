@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ACTION="${1:-install}"
-
 APP_NAME="Backend Manager Nenenet 3.0"
 PANEL_URL="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main/backendmgr"
 PANEL_DST="/usr/local/bin/backendmgr"
+UNINSTALL_URL="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main/uninstall.sh"
+UNINSTALL_DST="/usr/local/bin/backendmgr-uninstall"
 
 CFG_DIR="/etc/backendmgr"
 CFG_FILE="${CFG_DIR}/config.json"
@@ -31,6 +31,20 @@ NGX_LOGGING_SNIP="${NGX_DIR}/logging.conf"
 BACKUP_DIR="/etc/nginx/backendmgr-backups"
 
 need_root(){ [[ ${EUID:-999} -eq 0 ]] || { echo "ERROR: ejecutá con sudo."; exit 1; }; }
+
+# Permite desinstalar usando el mismo entrypoint:
+#   curl -fsSL <install.sh> | sudo bash -s uninstall
+if [[ "${1:-}" == "uninstall" ]]; then
+  echo "[UNINSTALL] Ejecutando desinstalación..."
+  if [[ -x "${UNINSTALL_DST}" ]]; then
+    "${UNINSTALL_DST}" || true
+    exit 0
+  fi
+  curl -fsSL "${UNINSTALL_URL}" | bash
+  exit 0
+fi
+
+
 
 backup_file(){
   local f="$1"
@@ -125,15 +139,6 @@ ensure_cfg_keys(){
     | .traffic_scan_interval = (.traffic_scan_interval // "1min")
   ' "$CFG_FILE" > "$tmp" && mv "$tmp" "$CFG_FILE"
 }
-
-download_uninstall(){
-  curl -fsSL "https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main/uninstall.sh" -o /tmp/backendmgr-uninstall.sh 2>/dev/null || return 0
-  sed -i 's/\r$//' /tmp/backendmgr-uninstall.sh 2>/dev/null || true
-  bash -n /tmp/backendmgr-uninstall.sh 2>/dev/null || return 0
-  install -m 0755 /tmp/backendmgr-uninstall.sh /usr/local/bin/backendmgr-uninstall 2>/dev/null || true
-  return 0
-}
-
 
 download_panel(){
   echo "[3/9] Descargando panel..."
@@ -351,8 +356,6 @@ cat > "$SBIN" <<'WRAP'
 #!/usr/bin/env bash
 set -euo pipefail
 
-ACTION="${1:-install}"
-
 PANEL="/usr/local/bin/backendmgr"
 REAL="/usr/sbin/nginx.real"
 LOG="/var/log/backendmgr.wrapper.log"
@@ -422,22 +425,6 @@ WRAP
 
 main(){
   need_root
-
-  if [[ "${ACTION}" == "uninstall" || "${ACTION}" == "remove" ]]; then
-    echo "[uninstall] Ejecutando desinstalación..."
-    if [[ -x "/usr/local/bin/backendmgr-uninstall" ]]; then
-      /usr/local/bin/backendmgr-uninstall
-      exit 0
-    fi
-    # si existe en el mismo repo
-    if curl -fsSL "https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main/uninstall.sh" -o /tmp/backendmgr-uninstall.sh; then
-      bash /tmp/backendmgr-uninstall.sh
-      exit 0
-    fi
-    echo "ERROR: no pude descargar uninstall.sh"
-    exit 1
-  fi
-
   export DEBIAN_FRONTEND=noninteractive
 
   echo "[1/8] Dependencias..."
@@ -449,7 +436,6 @@ main(){
   ensure_cfg_keys
 
   download_panel
-  download_uninstall || true
 
   echo "[4/8] Snippets..."
   write_snippets_if_missing
