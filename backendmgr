@@ -40,12 +40,6 @@ BACKUP_DIR="/etc/nginx/backendmgr-backups"
 # Logs
 PANEL_LOG="/var/log/backendmgr.panel.log"
 
-# ---- Guardas anti "unbound variable" (set -u) ----
-: "${STATE_DIR:=/var/lib/backendmgr}"
-: "${TRAFFIC_DB_BACKEND:=${STATE_DIR}/traffic_backend.db}"
-: "${TRAFFIC_DB_IP:=${STATE_DIR}/traffic_ip.db}"
-: "${TRAFFIC_DB_LAST_RUN:=${STATE_DIR}/traffic_last_run}"
-
 # ------------------ STATE (traffic scanner DB) ------------------
 STATE_DIR="/var/lib/backendmgr"
 TRAFFIC_DB_IP="${STATE_DIR}/traffic_ip.db"
@@ -246,26 +240,6 @@ server_files() { ls -1 "${SERVERS_DIR}"/*.conf 2>/dev/null || true; }
 
 backend_count() { backend_lines | wc -l | tr -d ' '; }
 domain_count() { server_files | wc -l | tr -d ' '; }
-
-domains_active_list() {
-  # Lista corta de dominios configurados (server_name) en servers/*.conf
-  mapfile -t __files < <(server_files)
-  if [[ "${#__files[@]}" -eq 0 ]]; then
-    echo "(ninguno)"; return 0
-  fi
-  local out="" dom f i=0
-  for f in "${__files[@]}"; do
-    dom="$(grep -E '^\s*server_name\s+' "$f" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
-    [[ -z "$dom" ]] && continue
-    if [[ -z "$out" ]]; then out="$dom"; else out="${out},${dom}"; fi
-    i=$((i+1))
-    (( i>=6 )) && break
-  done
-  if (( ${#__files[@]} > 6 )); then
-    out="${out},+$((${#__files[@]}-6))"
-  fi
-  echo "$out"
-}
 
 primary_domain_active() {
   if [[ -n "${PRIMARY_DOMAIN:-}" && "${PRIMARY_DOMAIN}" != "null" ]]; then
@@ -487,8 +461,8 @@ banner() {
 
   local l1 l2 l3 l4 l5 l6 l7 l8 l9 l10
   l1="🚀 ${APP_NAME} v${APP_VER}"
-  l2="🟢 Nginx: ${ng_state} | 🌐 Dominios: ${dcount} ($(domains_active_list)) | 🧱 Backends: ${bcount}"
-  l3="👑 Dominio madre activo: ${dom_active} | 📜 Lista: $(domains_active_list)"
+  l2="🟢 Nginx: ${ng_state} | 🌐 Dominios: ${dcount} | 🧱 Backends: ${bcount}"
+  l3="👑 Dominio madre activo: ${dom_active}"
   l4="🏷️  Header: ${HEADER_NAME} | 📈 Tráfico: $(traffic_log_state_short) | 🔎 Scanner: $(traffic_scan_state_short)"
   l5="💾 Backup: ${bkp}"
   l6=""
@@ -754,13 +728,18 @@ tail -c +"$start" "$STATS_LOG" 2>/dev/null | awk -F'|' -v keyf="$KEYFIELD" -v DB
   FNR==NR {
     # DB: key \t bytes \t req
     if($1!=""){
-      k=$1; b[k]+=$2; r[k]+=$3
+      k=$1
+      gsub(/\r/,"",k)
+      gsub(/^[ \t]+|[ \t]+$/,"",k)
+            b[k]+=$2; r[k]+=$3
     }
     next
   }
   {
     k=$keyf
-    if(k=="") k="(vacío)"
+    gsub(/\r/,"",k)
+    gsub(/^[ \t]+|[ \t]+$/,"",k)
+        if(k=="") k="(vacío)"
     bytes=$7
     if(bytes=="") bytes=0
     # bytes viene numérico
@@ -1002,38 +981,45 @@ traffic_scan_status() {
 
 traffic_show_from_db() {
   local mode="$1" # ip|backend
-  local db="/var/lib/backendmgr/traffic_totals_backend.db"
-  local title="BACKEND"
-  local w1="22"
+  local db="${TRAFFIC_DB_BACKEND:-/var/lib/backendmgr/traffic_totals_backend.db}"
 
   if [[ "$mode" == "ip" ]]; then
-    db="/var/lib/backendmgr/traffic_totals_ip.db"
-    title="IP"
-    w1="18"
-  fi
-
-  [[ -f "$db" ]] || { echo -e "${YLW}No hay resumen todavía (db vacío). Esperá 1 ciclo del scanner.${NC}"; return 0; }
-
-  if [[ "$mode" == "ip" ]]; then
-    printf "%-18s %-12s %-10s\n" "IP" "TOTAL(MB)" "REQ"
+    db="${TRAFFIC_DB_IP:-/var/lib/backendmgr/traffic_totals_ip.db}"
+    echo
+    printf "%-18s %-12s %-10s
+" "IP" "TOTAL(MB)" "REQ"
     echo "---------------------------------------------"
   else
-    printf "%-22s %-12s %-10s\n" "BACKEND" "TOTAL(MB)" "REQ"
+    echo
+    printf "%-22s %-12s %-10s
+" "BACKEND" "TOTAL(MB)" "REQ"
     echo "---------------------------------------------------"
   fi
 
-  # db: key \t bytes \t req
-  awk -F'\t' -v mode="$mode" '
-    {
-      k=$1; b=$2+0; r=$3+0;
-      mb=b/1024/1024;
-      if(mode=="ip"){
-        printf "%-18s %-12.2f %-10d\n", k, mb, r
-      } else {
-        printf "%-22s %-12.2f %-10d\n", k, mb, r
+  [[ -f "$db" ]] || { echo -e "${YLW}No hay datos todavía. Activá el scanner o recalculá.${NC}"; return 0; }
+
+  # Con pipefail, awk puede terminar con SIGPIPE cuando head corta; lo neutralizamos.
+  ( set +o pipefail
+    awk -F'	' '
+      BEGIN{OFS="	"}
+      {
+        k=$1
+        gsub(/
+/,"",k)
+        gsub(/^[ 	]+|[ 	]+$/,"",k)
+                if(k=="") next
+        b[k]+=$2; r[k]+=$3
       }
-    }
-  ' "$db" | head -n 30 || true
+      END{
+        for(k in b){
+          mb=b[k]/1024/1024
+          printf "%s	%.2f	%d
+", k, mb, r[k]
+        }
+      }
+    ' "$db" | sort -t$'	' -k2,2nr | head -n 30
+  ) || true
+
   return 0
 }
 
@@ -1453,15 +1439,6 @@ add_domain_auto_create() {
   validate_domain "$dom" || { echo -e "${RED}Dominio inválido.${NC}"; return 0; }
 
   create_server_for_domain "$dom" "300s" "600s" "600s"
-
-  # Si no hay primary_domain, seteamos este como principal
-  if [[ -f "$CFG_FILE" ]]; then
-    curpd="$(jq -r '.primary_domain // ""' "$CFG_FILE" 2>/dev/null || echo "")"
-    [[ "$curpd" == "null" ]] && curpd=""
-    if [[ -z "$curpd" ]]; then
-      jq --arg d "$dom" '.primary_domain = $d' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
-    fi
-  fi
   ensure_http_conf_maps
   ensure_mothers_include
   write_apply_conf
@@ -1568,13 +1545,6 @@ delete_domain_pick() {
     s|si|sí|y|yes) ;;
     *) echo -e "${YLW}Cancelado.${NC}"; return 0 ;;
   esac
-
-  # Si eliminás el dominio que está como primary_domain, lo limpiamos del config
-  if [[ -f "$CFG_FILE" ]]; then
-    if [[ "$(jq -r '.primary_domain // ""' "$CFG_FILE" 2>/dev/null || echo "")" == "$PICKED_DOMAIN" ]]; then
-      jq '.primary_domain = ""' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
-    fi
-  fi
 
   rm -f "$PICKED_DOMAIN_FILE" || true
   rm -f "$(target_file "$PICKED_DOMAIN")" 2>/dev/null || true
@@ -1904,9 +1874,6 @@ backup_bundle() {
   mkdir -p "$BACKUP_DIR"
   local out="${BACKUP_DIR}/bundle-$(date +%Y%m%d-%H%M%S).tar.gz"
   tar -czf "$out" \
-    --exclude="/var/lib/backendmgr/traffic_*" \
-    --exclude="/var/lib/backendmgr/*traffic*" \
-    --exclude="/var/lib/backendmgr/*scanner*" \
     /etc/nginx/nginx.conf \
     /etc/nginx/conf.d/backendmgr \
     /etc/backendmgr \
@@ -2022,6 +1989,12 @@ WantedBy=timers.target
 
   systemd_reload_daemon
   systemd_enable_start_timer "backendmgr-ramrefresh.timer"
+
+  # marcar como programado si todavía no corrió nunca
+  mkdir -p /var/lib/backendmgr 2>/dev/null || true
+  if [[ ! -s /var/lib/backendmgr/ramrefresh.last ]]; then
+    echo "(programado) $(date \'+%Y-%m-%d %H:%M:%S\')" > /var/lib/backendmgr/ramrefresh.last 2>/dev/null || true
+  fi
 
   echo -e "${GRN}✅ RAM refresh programado cada:${NC} ${every}"
   return 0
