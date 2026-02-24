@@ -2492,5 +2492,221 @@ main() {
     esac
   done
 }
+# ===================== PATCH FINAL (Opción 11 + RAM last refresh) =====================
+# Pegalo JUSTO ARRIBA de la última línea:  main
+# No borra nada: solo sobre-escribe funciones y asegura variables.
 
+# ---- Traffic DB (totales acumulados) ----
+TRAFFIC_DB_DIR="${TRAFFIC_DB_DIR:-/var/lib/backendmgr}"
+TRAFFIC_DB_BACKEND="${TRAFFIC_DB_BACKEND:-${TRAFFIC_DB_DIR}/traffic_backend.tsv}"
+TRAFFIC_DB_IP="${TRAFFIC_DB_IP:-${TRAFFIC_DB_DIR}/traffic_ip.tsv}"
+TRAFFIC_DB_LAST_RUN="${TRAFFIC_DB_LAST_RUN:-${TRAFFIC_DB_DIR}/traffic_last_run.txt}"
+
+# ---- RAM refresh stamp ----
+RAMREFRESH_LAST_FILE="${RAMREFRESH_LAST_FILE:-${TRAFFIC_DB_DIR}/ramrefresh_last.txt}"
+
+# Asegura archivos DB (no falla si ya existen)
+traffic_db_ensure() {
+  mkdir -p "$TRAFFIC_DB_DIR" 2>/dev/null || true
+  : > "$TRAFFIC_DB_BACKEND" 2>/dev/null || true
+  : > "$TRAFFIC_DB_IP" 2>/dev/null || true
+  : > "$TRAFFIC_DB_LAST_RUN" 2>/dev/null || true
+  : > "$RAMREFRESH_LAST_FILE" 2>/dev/null || true
+}
+
+# ------------------ FIX: Totales acumulados (opción 11 -> 6) ------------------
+# - Recalcula usando TODO el log
+# - Agrupa bien (sin duplicados)
+# - Evita rc=141 (SIGPIPE) usando set +e en el pipeline de salida
+traffic_totals_accumulated_show() {
+  read_cfg
+  traffic_db_ensure
+
+  echo -e "${CYA}Totales acumulados (usa todo el log y actualiza DB)${NC}"
+  echo "1) Por IP"
+  echo "2) Por Backend (header)"
+  read -r -p "Opción: " op
+  echo
+
+  [[ -f "$STATS_LOG" ]] || { echo -e "${YLW}No existe todavía: ${STATS_LOG}${NC}"; return 0; }
+
+  case "$op" in
+    1)
+      # IP = campo 2 | bytes = campo 7
+      awk -F'|' '
+        NF>=7{
+          k=$2
+          gsub(/\r/,"",k)
+          sub(/^[ \t]+/,"",k); sub(/[ \t]+$/,"",k)
+          if(k=="") next
+          b[k]+=$7
+          r[k]+=1
+        }
+        END{
+          for(k in b){
+            printf "%s\t%.0f\t%d\n", k, b[k], r[k]
+          }
+        }
+      ' "$STATS_LOG" > "${TRAFFIC_DB_IP}.tmp" 2>/dev/null || true
+      mv -f "${TRAFFIC_DB_IP}.tmp" "$TRAFFIC_DB_IP" 2>/dev/null || true
+      date "+%Y-%m-%d %H:%M:%S" > "$TRAFFIC_DB_LAST_RUN" 2>/dev/null || true
+
+      printf "%-18s %-12s %-10s\n" "IP" "TOTAL(MB)" "REQ"
+      echo "---------------------------------------------"
+
+      set +e
+      awk -F'\t' '
+        NF>=3{
+          k=$1
+          gsub(/\r/,"",k)
+          sub(/^[ \t]+/,"",k); sub(/[ \t]+$/,"",k)
+          if(k=="") next
+          b[k]+=$2
+          r[k]+=$3
+        }
+        END{
+          for(k in b){
+            mb=b[k]/1024/1024
+            printf "%-18s %-12.2f %-10d\n", k, mb, r[k]
+          }
+        }
+      ' "$TRAFFIC_DB_IP" 2>/dev/null | sort -k2 -nr | head -n 30
+      set -e
+      ;;
+    2)
+      # Backend(header) = campo 4 | bytes = campo 7
+      awk -F'|' '
+        NF>=7{
+          k=$4
+          if(k=="") k="(vacío)"
+          gsub(/\r/,"",k)
+          sub(/^[ \t]+/,"",k); sub(/[ \t]+$/,"",k)
+          if(k=="") next
+          b[k]+=$7
+          r[k]+=1
+        }
+        END{
+          for(k in b){
+            printf "%s\t%.0f\t%d\n", k, b[k], r[k]
+          }
+        }
+      ' "$STATS_LOG" > "${TRAFFIC_DB_BACKEND}.tmp" 2>/dev/null || true
+      mv -f "${TRAFFIC_DB_BACKEND}.tmp" "$TRAFFIC_DB_BACKEND" 2>/dev/null || true
+      date "+%Y-%m-%d %H:%M:%S" > "$TRAFFIC_DB_LAST_RUN" 2>/dev/null || true
+
+      printf "%-22s %-12s %-10s\n" "BACKEND" "TOTAL(MB)" "REQ"
+      echo "---------------------------------------------------"
+
+      set +e
+      awk -F'\t' '
+        NF>=3{
+          k=$1
+          gsub(/\r/,"",k)
+          sub(/^[ \t]+/,"",k); sub(/[ \t]+$/,"",k)
+          if(k=="") next
+          b[k]+=$2
+          r[k]+=$3
+        }
+        END{
+          for(k in b){
+            mb=b[k]/1024/1024
+            printf "%-22s %-12.2f %-10d\n", k, mb, r[k]
+          }
+        }
+      ' "$TRAFFIC_DB_BACKEND" 2>/dev/null | sort -k2 -nr | head -n 30
+      set -e
+      ;;
+    *) echo -e "${YLW}Opción inválida${NC}" ;;
+  esac
+
+  echo
+  if [[ -s "$TRAFFIC_DB_LAST_RUN" ]]; then
+    echo -e "${DIM}Último recálculo:${NC} $(cat "$TRAFFIC_DB_LAST_RUN" 2>/dev/null || true)"
+  fi
+  return 0
+}
+
+# ✅ Alias por si tu menú llama otro nombre (no rompe nada)
+traffic_totals_accumulated() { traffic_totals_accumulated_show; }
+
+# ------------------ FIX: “Último refresco RAM” en banner ------------------
+# Si tu banner usa una función para mostrar esto, la pisamos con una segura.
+ramrefresh_last_readable() {
+  traffic_db_ensure
+  local v
+  v="$(cat "$RAMREFRESH_LAST_FILE" 2>/dev/null || true)"
+  [[ -n "$v" ]] && echo "$v" || echo "(nunca)"
+}
+
+# Si tu banner llama RAM_REFRESH_LAST, también se lo damos.
+RAM_REFRESH_LAST="$(ramrefresh_last_readable 2>/dev/null || true)"
+
+# ------------------ FIX: systemd ramrefresh timer (service + timer) ------------------
+# Tu error de antes “service to trigger not loaded” pasa cuando el timer existe pero el service no.
+# Esta función pisa la anterior y SIEMPRE crea ambos correctamente.
+ramrefresh_install_or_update() {
+  local every="$1"
+  [[ -n "${every:-}" ]] || return 0
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo -e "${YLW}⚠️ No hay systemd/systemctl. No puedo programarlo en este sistema.${NC}"
+    return 0
+  fi
+
+  mkdir -p "$TRAFFIC_DB_DIR" 2>/dev/null || true
+
+  cat > /etc/systemd/system/backendmgr-ramrefresh.service <<EOF
+[Unit]
+Description=BackendMgr RAM refresh (sync + drop caches)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -lc 'sync; echo 3 > /proc/sys/vm/drop_caches; date "+%Y-%m-%d %H:%M:%S" > "${RAMREFRESH_LAST_FILE}"'
+EOF
+
+  cat > /etc/systemd/system/backendmgr-ramrefresh.timer <<EOF
+[Unit]
+Description=BackendMgr RAM refresh timer
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=${every}
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl enable --now backendmgr-ramrefresh.timer >/dev/null 2>&1 || true
+
+  echo -e "${GRN}✅ RAM refresh programado cada:${NC} ${every}"
+  return 0
+}
+
+ramrefresh_disable() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    return 0
+  fi
+  systemctl disable --now backendmgr-ramrefresh.timer >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/backendmgr-ramrefresh.timer /etc/systemd/system/backendmgr-ramrefresh.service 2>/dev/null || true
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  echo -e "${GRN}✅ RAM refresh desactivado.${NC}"
+  return 0
+}
+
+ramrefresh_status() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    return 0
+  fi
+  systemctl status backendmgr-ramrefresh.timer --no-pager 2>/dev/null || true
+  echo
+  systemctl list-timers --all | grep -E 'backendmgr-ramrefresh' || true
+  return 0
+}
+# =================== FIN PATCH FINAL ===================
 main
