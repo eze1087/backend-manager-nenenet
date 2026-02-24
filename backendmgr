@@ -728,18 +728,13 @@ tail -c +"$start" "$STATS_LOG" 2>/dev/null | awk -F'|' -v keyf="$KEYFIELD" -v DB
   FNR==NR {
     # DB: key \t bytes \t req
     if($1!=""){
-      k=$1
-      gsub(/\r/,"",k)
-      gsub(/^[ \t]+|[ \t]+$/,"",k)
-            b[k]+=$2; r[k]+=$3
+      k=$1; b[k]+=$2; r[k]+=$3
     }
     next
   }
   {
     k=$keyf
-    gsub(/\r/,"",k)
-    gsub(/^[ \t]+|[ \t]+$/,"",k)
-        if(k=="") k="(vacío)"
+    if(k=="") k="(vacío)"
     bytes=$7
     if(bytes=="") bytes=0
     # bytes viene numérico
@@ -866,48 +861,55 @@ traffic_scan_disable_units() {
 
 # Recalcula totales acumulados leyendo TODO el log y guardando DB
 traffic_scan_run_now() {
-  # args: mode (backend|ip)
-  local mode="${1:-backend}"
-  [[ "$mode" == "backend" || "$mode" == "ip" ]] || mode="backend"
+  local mode="${1:-backend}"   # backend|ip
+  read_cfg >/dev/null 2>&1 || true
 
-  read_cfg
-  [[ -f "$STATS_LOG" ]] || { echo -e "${YLW}No existe todavía: ${STATS_LOG}${NC}"; return 0; }
+  local log="${STATS_LOG:-/var/log/nginx/backendmgr.stats.log}"
+  [[ -f "$log" ]] || { echo -e "${YLW}No existe todavía: ${log}${NC}"; return 0; }
 
-  mkdir -p /var/lib/backendmgr
+  local state_dir="${STATE_DIR:-/var/lib/backendmgr}"
+  mkdir -p "$state_dir" 2>/dev/null || true
 
-  local db="${TRAFFIC_DB_BACKEND:-${STATE_DIR:-/var/lib/backendmgr}/traffic_backend.db}"
-  [[ "$mode" == "ip" ]] && db="${TRAFFIC_DB_IP:-${STATE_DIR:-/var/lib/backendmgr}/traffic_ip.db}"
+  local db_ip="${TRAFFIC_DB_IP:-${state_dir}/traffic_ip.db}"
+  local db_be="${TRAFFIC_DB_BACKEND:-${state_dir}/traffic_backend.db}"
+  local last="${TRAFFIC_DB_LAST_RUN:-${state_dir}/traffic_last_run}"
 
-  # Formato DB: key|bytes|req
+  local tmp
+  tmp="$(mktemp)"
+
   if [[ "$mode" == "ip" ]]; then
+    # acumula por IP
     awk -F'|' '
-      NF>=7{
-        ip=$2; bytes=$7+0;
-        req[ip]+=1; b[ip]+=bytes
+      { ip=$2; bytes=$7+0; if(ip=="") next;
+        gsub(/
+/,"",ip); gsub(/^[ 	]+|[ 	]+$/,"",ip);
+        b[ip]+=bytes; r[ip]+=1
       }
-      END{
-        for(i in b){
-          printf "%s|%.0f|%d\n", i, b[i], req[i]
-        }
-      }' "$STATS_LOG" | sort -t'|' -k2,2nr > "${db}.tmp"
+      END{ for(k in b){ printf "%s|%.0f|%d
+", k, b[k], r[k] } }
+    ' "$log" > "$tmp"
+    sort -t'|' -k2 -nr "$tmp" > "${tmp}.s" && mv "${tmp}.s" "$tmp"
+    mv "$tmp" "$db_ip"
   else
+    # acumula por Backend (header)
     awk -F'|' '
-      NF>=7{
-        be=$4; if(be=="") be="(vacío)";
-        bytes=$7+0;
-        req[be]+=1; b[be]+=bytes
+      { be=$4; bytes=$7+0;
+        gsub(/
+/,"",be); gsub(/^[ 	]+|[ 	]+$/,"",be);
+        if(be=="") be="(vacío)";
+        b[be]+=bytes; r[be]+=1
       }
-      END{
-        for(i in b){
-          printf "%s|%.0f|%d\n", i, b[i], req[i]
-        }
-      }' "$STATS_LOG" | sort -t'|' -k2,2nr > "${db}.tmp"
+      END{ for(k in b){ printf "%s|%.0f|%d
+", k, b[k], r[k] } }
+    ' "$log" > "$tmp"
+    sort -t'|' -k2 -nr "$tmp" > "${tmp}.s" && mv "${tmp}.s" "$tmp"
+    mv "$tmp" "$db_be"
   fi
 
-  mv "${db}.tmp" "$db" 2>/dev/null || true
-  date '+%Y-%m-%d %H:%M:%S' > "$TRAFFIC_DB_LAST_RUN" 2>/dev/null || true
+  date '+%Y-%m-%d %H:%M:%S' > "$last" 2>/dev/null || true
   return 0
 }
+
 
 traffic_scan_enable() {
   local mode="$1" interval="$2"
@@ -981,47 +983,51 @@ traffic_scan_status() {
 
 traffic_show_from_db() {
   local mode="$1" # ip|backend
-  local db="${TRAFFIC_DB_BACKEND:-/var/lib/backendmgr/traffic_totals_backend.db}"
+  local db="${TRAFFIC_DB_BACKEND:-/var/lib/backendmgr/traffic_backend.db}"
+  local title="BACKEND"
 
   if [[ "$mode" == "ip" ]]; then
-    db="${TRAFFIC_DB_IP:-/var/lib/backendmgr/traffic_totals_ip.db}"
-    echo
+    db="${TRAFFIC_DB_IP:-/var/lib/backendmgr/traffic_ip.db}"
+    title="IP"
+  fi
+
+  [[ -f "$db" ]] || { echo -e "${YLW}No hay resumen todavía (db vacío). Ejecutá el scanner o Totales acumulados.${NC}"; return 0; }
+
+  if [[ "$mode" == "ip" ]]; then
     printf "%-18s %-12s %-10s
 " "IP" "TOTAL(MB)" "REQ"
     echo "---------------------------------------------"
   else
-    echo
     printf "%-22s %-12s %-10s
 " "BACKEND" "TOTAL(MB)" "REQ"
     echo "---------------------------------------------------"
   fi
 
-  [[ -f "$db" ]] || { echo -e "${YLW}No hay datos todavía. Activá el scanner o recalculá.${NC}"; return 0; }
+  # DB (formato): key|bytes|req
+  awk -F'|' -v mode="$mode" '
+    {
+      k=$1; b=$2+0; r=$3+0;
 
-  # Con pipefail, awk puede terminar con SIGPIPE cuando head corta; lo neutralizamos.
-  ( set +o pipefail
-    awk -F'	' '
-      BEGIN{OFS="	"}
-      {
-        k=$1
-        gsub(/
-/,"",k)
-        gsub(/^[ 	]+|[ 	]+$/,"",k)
-                if(k=="") next
-        b[k]+=$2; r[k]+=$3
+      # normalizar key (evita duplicados por CR/espacios)
+      gsub(/
+/,"",k);
+      gsub(/^[ 	]+|[ 	]+$/,"",k);
+      if(k=="") next;
+
+      mb=b/1024/1024;
+      if(mode=="ip"){
+        printf "%-18s %-12.2f %-10d
+", k, mb, r
+      } else {
+        printf "%-22s %-12.2f %-10d
+", k, mb, r
       }
-      END{
-        for(k in b){
-          mb=b[k]/1024/1024
-          printf "%s	%.2f	%d
-", k, mb, r[k]
-        }
-      }
-    ' "$db" | sort -t$'	' -k2,2nr | head -n 30
-  ) || true
+    }
+  ' "$db" 2>/dev/null | sort -k2 -nr | head -n 30 || true
 
   return 0
 }
+
 
 traffic_scan_menu() {
   read_cfg
@@ -1989,12 +1995,6 @@ WantedBy=timers.target
 
   systemd_reload_daemon
   systemd_enable_start_timer "backendmgr-ramrefresh.timer"
-
-  # marcar como programado si todavía no corrió nunca
-  mkdir -p /var/lib/backendmgr 2>/dev/null || true
-  if [[ ! -s /var/lib/backendmgr/ramrefresh.last ]]; then
-    echo "(programado) $(date \'+%Y-%m-%d %H:%M:%S\')" > /var/lib/backendmgr/ramrefresh.last 2>/dev/null || true
-  fi
 
   echo -e "${GRN}✅ RAM refresh programado cada:${NC} ${every}"
   return 0
