@@ -40,16 +40,8 @@ BACKUP_DIR="/etc/nginx/backendmgr-backups"
 # Logs
 PANEL_LOG="/var/log/backendmgr.panel.log"
 
-# ---- Guardas anti "unbound variable" (set -u) ----
-: "${STATE_DIR:=/var/lib/backendmgr}"
-: "${TRAFFIC_DB_BACKEND:=${STATE_DIR}/traffic_backend.db}"
-: "${TRAFFIC_DB_IP:=${STATE_DIR}/traffic_ip.db}"
-: "${TRAFFIC_DB_LAST_RUN:=${STATE_DIR}/traffic_last_run}"
-
 # ------------------ STATE (traffic scanner DB) ------------------
 STATE_DIR="/var/lib/backendmgr"
-RAMREFRESH_LAST_FILE="${STATE_DIR}/ramrefresh.last"
-
 TRAFFIC_DB_IP="${STATE_DIR}/traffic_ip.db"
 TRAFFIC_DB_BACKEND="${STATE_DIR}/traffic_backend.db"
 TRAFFIC_DB_LAST_RUN="${STATE_DIR}/traffic_last_run"
@@ -249,26 +241,6 @@ server_files() { ls -1 "${SERVERS_DIR}"/*.conf 2>/dev/null || true; }
 backend_count() { backend_lines | wc -l | tr -d ' '; }
 domain_count() { server_files | wc -l | tr -d ' '; }
 
-domains_active_list() {
-  # Lista corta de dominios configurados (server_name) en servers/*.conf
-  mapfile -t __files < <(server_files)
-  if [[ "${#__files[@]}" -eq 0 ]]; then
-    echo "(ninguno)"; return 0
-  fi
-  local out="" dom f i=0
-  for f in "${__files[@]}"; do
-    dom="$(grep -E '^\s*server_name\s+' "$f" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
-    [[ -z "$dom" ]] && continue
-    if [[ -z "$out" ]]; then out="$dom"; else out="${out},${dom}"; fi
-    i=$((i+1))
-    (( i>=6 )) && break
-  done
-  if (( ${#__files[@]} > 6 )); then
-    out="${out},+$((${#__files[@]}-6))"
-  fi
-  echo "$out"
-}
-
 primary_domain_active() {
   if [[ -n "${PRIMARY_DOMAIN:-}" && "${PRIMARY_DOMAIN}" != "null" ]]; then
     echo "$PRIMARY_DOMAIN"; return 0
@@ -424,22 +396,12 @@ net_totals_line() {
 }
 
 ramrefresh_last_line() {
-  local f="${RAMREFRESH_LAST_FILE:-/var/lib/backendmgr/ramrefresh.last}"
-
+  local f="/var/lib/backendmgr/ramrefresh.last"
   if [[ -f "$f" ]]; then
-    echo "🧹 Último refresco RAM: $(head -n1 "$f" 2>/dev/null)"
-    return 0
+    echo "🧹 Último refresco RAM: $(cat "$f" 2>/dev/null | head -n1)"
+  else
+    echo "🧹 Último refresco RAM: (nunca)"
   fi
-
-  # Si está programado pero todavía no corrió, lo mostramos igual
-  if command -v systemctl >/dev/null 2>&1; then
-    if systemctl list-timers --all 2>/dev/null | grep -q 'backendmgr-ramrefresh.timer'; then
-      echo "🧹 Último refresco RAM: (programado)"
-      return 0
-    fi
-  fi
-
-  echo "🧹 Último refresco RAM: (nunca)"
 }
 
 # imprime una línea dentro del recuadro con ancho fijo (respetando emojis/ancho real)
@@ -499,8 +461,8 @@ banner() {
 
   local l1 l2 l3 l4 l5 l6 l7 l8 l9 l10
   l1="🚀 ${APP_NAME} v${APP_VER}"
-  l2="🟢 Nginx: ${ng_state} | 🌐 Dominios: ${dcount} ($(domains_active_list)) | 🧱 Backends: ${bcount}"
-  l3="👑 Dominio madre activo: ${dom_active} | 📜 Lista: $(domains_active_list)"
+  l2="🟢 Nginx: ${ng_state} | 🌐 Dominios: ${dcount} | 🧱 Backends: ${bcount}"
+  l3="👑 Dominio madre activo: ${dom_active}"
   l4="🏷️  Header: ${HEADER_NAME} | 📈 Tráfico: $(traffic_log_state_short) | 🔎 Scanner: $(traffic_scan_state_short)"
   l5="💾 Backup: ${bkp}"
   l6=""
@@ -899,6 +861,7 @@ traffic_scan_disable_units() {
 
 # Recalcula totales acumulados leyendo TODO el log y guardando DB
 traffic_scan_run_now() {
+  # args: mode (backend|ip) - recalcula totales leyendo TODO el log
   local mode="${1:-backend}"
   [[ "$mode" == "backend" || "$mode" == "ip" ]] || mode="backend"
 
@@ -910,15 +873,15 @@ traffic_scan_run_now() {
 
   local db_backend="${TRAFFIC_DB_BACKEND:-${state_dir}/traffic_backend.db}"
   local db_ip="${TRAFFIC_DB_IP:-${state_dir}/traffic_ip.db}"
-  local last_run="${TRAFFIC_DB_LAST_RUN:-${state_dir}/traffic_last_run.txt}"
+  local last_run="${TRAFFIC_DB_LAST_RUN:-${state_dir}/traffic_last_run}"
 
   local db="$db_backend"
   [[ "$mode" == "ip" ]] && db="$db_ip"
 
-  # Recalcula totales usando TODO el log (sin depender de \r en regex; compatible mawk)
+  # Formato de salida DB: key<TAB>bytes<TAB>req  (compat mawk/gawk)
   if [[ "$mode" == "ip" ]]; then
     awk -F'|' '
-      BEGIN{ cr=sprintf("%c",13) }
+      BEGIN{ cr=sprintf("%c",13); OFS="	" }
       NF>=7{
         k=$2
         gsub(cr,"",k)
@@ -927,11 +890,11 @@ traffic_scan_run_now() {
         bytes=$7+0
         req[k]+=1; b[k]+=bytes
       }
-      END{ for(k in b){ printf "%s|%.0f|%d\n", k, b[k], req[k] } }
-    ' "$STATS_LOG" | sort -t"|" -k2,2nr > "${db}.tmp"
+      END{ for(k in b){ print k, b[k], req[k] } }
+    ' "$STATS_LOG" 2>/dev/null | sort -k2,2nr > "${db}.tmp" || true
   else
     awk -F'|' '
-      BEGIN{ cr=sprintf("%c",13) }
+      BEGIN{ cr=sprintf("%c",13); OFS="	" }
       NF>=7{
         k=$4
         if(k=="") k="(vacío)"
@@ -941,14 +904,21 @@ traffic_scan_run_now() {
         bytes=$7+0
         req[k]+=1; b[k]+=bytes
       }
-      END{ for(k in b){ printf "%s|%.0f|%d\n", k, b[k], req[k] } }
-    ' "$STATS_LOG" | sort -t"|" -k2,2nr > "${db}.tmp"
+      END{ for(k in b){ print k, b[k], req[k] } }
+    ' "$STATS_LOG" 2>/dev/null | sort -k2,2nr > "${db}.tmp" || true
   fi
 
-  mv "${db}.tmp" "$db" 2>/dev/null || true
+  if [[ -s "${db}.tmp" ]]; then
+    mv -f "${db}.tmp" "$db" 2>/dev/null || true
+  else
+    rm -f "${db}.tmp" 2>/dev/null || true
+    : > "$db" 2>/dev/null || true
+  fi
+
   date '+%Y-%m-%d %H:%M:%S' > "$last_run" 2>/dev/null || true
   return 0
 }
+
 
 traffic_scan_enable() {
   local mode="$1" interval="$2"
@@ -1022,40 +992,55 @@ traffic_scan_status() {
 
 traffic_show_from_db() {
   local mode="$1" # ip|backend
-  local db="/var/lib/backendmgr/traffic_totals_backend.db"
-  local title="BACKEND"
-  local w1="22"
+  local db_backend="${TRAFFIC_DB_BACKEND:-/var/lib/backendmgr/traffic_backend.db}"
+  local db_ip="${TRAFFIC_DB_IP:-/var/lib/backendmgr/traffic_ip.db}"
 
+  local db="$db_backend"
+  local title="BACKEND"
   if [[ "$mode" == "ip" ]]; then
-    db="/var/lib/backendmgr/traffic_totals_ip.db"
+    db="$db_ip"
     title="IP"
-    w1="18"
   fi
 
-  [[ -f "$db" ]] || { echo -e "${YLW}No hay resumen todavía (db vacío). Esperá 1 ciclo del scanner.${NC}"; return 0; }
+  [[ -f "$db" ]] || { echo -e "${YLW}No hay resumen todavía (db vacío).${NC}"; return 0; }
 
   if [[ "$mode" == "ip" ]]; then
-    printf "%-18s %-12s %-10s\n" "IP" "TOTAL(MB)" "REQ"
+    printf "%-18s %-12s %-10s
+" "IP" "TOTAL(MB)" "REQ"
     echo "---------------------------------------------"
   else
-    printf "%-22s %-12s %-10s\n" "BACKEND" "TOTAL(MB)" "REQ"
+    printf "%-22s %-12s %-10s
+" "BACKEND" "TOTAL(MB)" "REQ"
     echo "---------------------------------------------------"
   fi
 
-  # db: key \t bytes \t req
-  awk -F'\t' -v mode="$mode" '
-    {
-      k=$1; b=$2+0; r=$3+0;
-      mb=b/1024/1024;
-      if(mode=="ip"){
-        printf "%-18s %-12.2f %-10d\n", k, mb, r
-      } else {
-        printf "%-22s %-12.2f %-10d\n", k, mb, r
+  # db puede venir como: key<TAB>bytes<TAB>req   o   key|bytes|req
+  # Evitamos rc=141 (SIGPIPE) por head en pipelines usando subshell sin pipefail.
+  (
+    set +e
+    set +o pipefail 2>/dev/null || true
+    awk -F'[	|]' -v mode="$mode" '
+      BEGIN{ cr=sprintf("%c",13) }
+      NF>=3{
+        k=$1; b=$2+0; r=$3+0;
+        gsub(cr,"",k);
+        sub(/^[[:space:]]+/,"",k); sub(/[[:space:]]+$/,"",k);
+        if(k=="") next;
+        mb=b/1024/1024;
+        if(mode=="ip"){
+          printf "%-18s %-12.2f %-10d
+", k, mb, r
+        } else {
+          printf "%-22s %-12.2f %-10d
+", k, mb, r
+        }
       }
-    }
-  ' "$db" | head -n 30 || true
+    ' "$db" 2>/dev/null | sort -k2 -nr | head -n 30
+    exit 0
+  ) || true
   return 0
 }
+
 
 traffic_scan_menu() {
   read_cfg
@@ -1473,15 +1458,6 @@ add_domain_auto_create() {
   validate_domain "$dom" || { echo -e "${RED}Dominio inválido.${NC}"; return 0; }
 
   create_server_for_domain "$dom" "300s" "600s" "600s"
-
-  # Si no hay primary_domain, seteamos este como principal
-  if [[ -f "$CFG_FILE" ]]; then
-    curpd="$(jq -r '.primary_domain // ""' "$CFG_FILE" 2>/dev/null || echo "")"
-    [[ "$curpd" == "null" ]] && curpd=""
-    if [[ -z "$curpd" ]]; then
-      jq --arg d "$dom" '.primary_domain = $d' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
-    fi
-  fi
   ensure_http_conf_maps
   ensure_mothers_include
   write_apply_conf
@@ -1588,13 +1564,6 @@ delete_domain_pick() {
     s|si|sí|y|yes) ;;
     *) echo -e "${YLW}Cancelado.${NC}"; return 0 ;;
   esac
-
-  # Si eliminás el dominio que está como primary_domain, lo limpiamos del config
-  if [[ -f "$CFG_FILE" ]]; then
-    if [[ "$(jq -r '.primary_domain // ""' "$CFG_FILE" 2>/dev/null || echo "")" == "$PICKED_DOMAIN" ]]; then
-      jq '.primary_domain = ""' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
-    fi
-  fi
 
   rm -f "$PICKED_DOMAIN_FILE" || true
   rm -f "$(target_file "$PICKED_DOMAIN")" 2>/dev/null || true
@@ -1924,9 +1893,6 @@ backup_bundle() {
   mkdir -p "$BACKUP_DIR"
   local out="${BACKUP_DIR}/bundle-$(date +%Y%m%d-%H%M%S).tar.gz"
   tar -czf "$out" \
-    --exclude="/var/lib/backendmgr/traffic_*" \
-    --exclude="/var/lib/backendmgr/*traffic*" \
-    --exclude="/var/lib/backendmgr/*scanner*" \
     /etc/nginx/nginx.conf \
     /etc/nginx/conf.d/backendmgr \
     /etc/backendmgr \
@@ -2457,7 +2423,7 @@ main() {
     traffic_scan_write_helper >/dev/null 2>&1 || true
     # si el timer no existe, lo recreamos
     if ! systemctl list-unit-files 2>/dev/null | grep -q '^backendmgr-traffic-scan\.timer'; then
-      traffic_scan_write_units "${TRAFFIC_SCAN_INTERVAL}" >/dev/null 2>&1 || true
+      traffic_scan_write_units "${TRAFFIC_SCAN_MODE}" "${TRAFFIC_SCAN_INTERVAL}" >/dev/null 2>&1 || true
       systemd_reload_daemon
       systemctl enable --now backendmgr-traffic-scan.timer >/dev/null 2>&1 || true
     fi
@@ -2492,221 +2458,5 @@ main() {
     esac
   done
 }
-# ===================== PATCH FINAL (Opción 11 + RAM last refresh) =====================
-# Pegalo JUSTO ARRIBA de la última línea:  main
-# No borra nada: solo sobre-escribe funciones y asegura variables.
 
-# ---- Traffic DB (totales acumulados) ----
-TRAFFIC_DB_DIR="${TRAFFIC_DB_DIR:-/var/lib/backendmgr}"
-TRAFFIC_DB_BACKEND="${TRAFFIC_DB_BACKEND:-${TRAFFIC_DB_DIR}/traffic_backend.tsv}"
-TRAFFIC_DB_IP="${TRAFFIC_DB_IP:-${TRAFFIC_DB_DIR}/traffic_ip.tsv}"
-TRAFFIC_DB_LAST_RUN="${TRAFFIC_DB_LAST_RUN:-${TRAFFIC_DB_DIR}/traffic_last_run.txt}"
-
-# ---- RAM refresh stamp ----
-RAMREFRESH_LAST_FILE="${RAMREFRESH_LAST_FILE:-${TRAFFIC_DB_DIR}/ramrefresh_last.txt}"
-
-# Asegura archivos DB (no falla si ya existen)
-traffic_db_ensure() {
-  mkdir -p "$TRAFFIC_DB_DIR" 2>/dev/null || true
-  : > "$TRAFFIC_DB_BACKEND" 2>/dev/null || true
-  : > "$TRAFFIC_DB_IP" 2>/dev/null || true
-  : > "$TRAFFIC_DB_LAST_RUN" 2>/dev/null || true
-  : > "$RAMREFRESH_LAST_FILE" 2>/dev/null || true
-}
-
-# ------------------ FIX: Totales acumulados (opción 11 -> 6) ------------------
-# - Recalcula usando TODO el log
-# - Agrupa bien (sin duplicados)
-# - Evita rc=141 (SIGPIPE) usando set +e en el pipeline de salida
-traffic_totals_accumulated_show() {
-  read_cfg
-  traffic_db_ensure
-
-  echo -e "${CYA}Totales acumulados (usa todo el log y actualiza DB)${NC}"
-  echo "1) Por IP"
-  echo "2) Por Backend (header)"
-  read -r -p "Opción: " op
-  echo
-
-  [[ -f "$STATS_LOG" ]] || { echo -e "${YLW}No existe todavía: ${STATS_LOG}${NC}"; return 0; }
-
-  case "$op" in
-    1)
-      # IP = campo 2 | bytes = campo 7
-      awk -F'|' '
-        NF>=7{
-          k=$2
-          gsub(/\r/,"",k)
-          sub(/^[ \t]+/,"",k); sub(/[ \t]+$/,"",k)
-          if(k=="") next
-          b[k]+=$7
-          r[k]+=1
-        }
-        END{
-          for(k in b){
-            printf "%s\t%.0f\t%d\n", k, b[k], r[k]
-          }
-        }
-      ' "$STATS_LOG" > "${TRAFFIC_DB_IP}.tmp" 2>/dev/null || true
-      mv -f "${TRAFFIC_DB_IP}.tmp" "$TRAFFIC_DB_IP" 2>/dev/null || true
-      date "+%Y-%m-%d %H:%M:%S" > "$TRAFFIC_DB_LAST_RUN" 2>/dev/null || true
-
-      printf "%-18s %-12s %-10s\n" "IP" "TOTAL(MB)" "REQ"
-      echo "---------------------------------------------"
-
-      set +e
-      awk -F'\t' '
-        NF>=3{
-          k=$1
-          gsub(/\r/,"",k)
-          sub(/^[ \t]+/,"",k); sub(/[ \t]+$/,"",k)
-          if(k=="") next
-          b[k]+=$2
-          r[k]+=$3
-        }
-        END{
-          for(k in b){
-            mb=b[k]/1024/1024
-            printf "%-18s %-12.2f %-10d\n", k, mb, r[k]
-          }
-        }
-      ' "$TRAFFIC_DB_IP" 2>/dev/null | sort -k2 -nr | head -n 30
-      set -e
-      ;;
-    2)
-      # Backend(header) = campo 4 | bytes = campo 7
-      awk -F'|' '
-        NF>=7{
-          k=$4
-          if(k=="") k="(vacío)"
-          gsub(/\r/,"",k)
-          sub(/^[ \t]+/,"",k); sub(/[ \t]+$/,"",k)
-          if(k=="") next
-          b[k]+=$7
-          r[k]+=1
-        }
-        END{
-          for(k in b){
-            printf "%s\t%.0f\t%d\n", k, b[k], r[k]
-          }
-        }
-      ' "$STATS_LOG" > "${TRAFFIC_DB_BACKEND}.tmp" 2>/dev/null || true
-      mv -f "${TRAFFIC_DB_BACKEND}.tmp" "$TRAFFIC_DB_BACKEND" 2>/dev/null || true
-      date "+%Y-%m-%d %H:%M:%S" > "$TRAFFIC_DB_LAST_RUN" 2>/dev/null || true
-
-      printf "%-22s %-12s %-10s\n" "BACKEND" "TOTAL(MB)" "REQ"
-      echo "---------------------------------------------------"
-
-      set +e
-      awk -F'\t' '
-        NF>=3{
-          k=$1
-          gsub(/\r/,"",k)
-          sub(/^[ \t]+/,"",k); sub(/[ \t]+$/,"",k)
-          if(k=="") next
-          b[k]+=$2
-          r[k]+=$3
-        }
-        END{
-          for(k in b){
-            mb=b[k]/1024/1024
-            printf "%-22s %-12.2f %-10d\n", k, mb, r[k]
-          }
-        }
-      ' "$TRAFFIC_DB_BACKEND" 2>/dev/null | sort -k2 -nr | head -n 30
-      set -e
-      ;;
-    *) echo -e "${YLW}Opción inválida${NC}" ;;
-  esac
-
-  echo
-  if [[ -s "$TRAFFIC_DB_LAST_RUN" ]]; then
-    echo -e "${DIM}Último recálculo:${NC} $(cat "$TRAFFIC_DB_LAST_RUN" 2>/dev/null || true)"
-  fi
-  return 0
-}
-
-# ✅ Alias por si tu menú llama otro nombre (no rompe nada)
-traffic_totals_accumulated() { traffic_totals_accumulated_show; }
-
-# ------------------ FIX: “Último refresco RAM” en banner ------------------
-# Si tu banner usa una función para mostrar esto, la pisamos con una segura.
-ramrefresh_last_readable() {
-  traffic_db_ensure
-  local v
-  v="$(cat "$RAMREFRESH_LAST_FILE" 2>/dev/null || true)"
-  [[ -n "$v" ]] && echo "$v" || echo "(nunca)"
-}
-
-# Si tu banner llama RAM_REFRESH_LAST, también se lo damos.
-RAM_REFRESH_LAST="$(ramrefresh_last_readable 2>/dev/null || true)"
-
-# ------------------ FIX: systemd ramrefresh timer (service + timer) ------------------
-# Tu error de antes “service to trigger not loaded” pasa cuando el timer existe pero el service no.
-# Esta función pisa la anterior y SIEMPRE crea ambos correctamente.
-ramrefresh_install_or_update() {
-  local every="$1"
-  [[ -n "${every:-}" ]] || return 0
-
-  if ! command -v systemctl >/dev/null 2>&1; then
-    echo -e "${YLW}⚠️ No hay systemd/systemctl. No puedo programarlo en este sistema.${NC}"
-    return 0
-  fi
-
-  mkdir -p "$TRAFFIC_DB_DIR" 2>/dev/null || true
-
-  cat > /etc/systemd/system/backendmgr-ramrefresh.service <<EOF
-[Unit]
-Description=BackendMgr RAM refresh (sync + drop caches)
-After=network.target
-
-[Service]
-Type=oneshot
-ExecStart=/bin/bash -lc 'sync; echo 3 > /proc/sys/vm/drop_caches; date "+%Y-%m-%d %H:%M:%S" > "${RAMREFRESH_LAST_FILE}"'
-EOF
-
-  cat > /etc/systemd/system/backendmgr-ramrefresh.timer <<EOF
-[Unit]
-Description=BackendMgr RAM refresh timer
-
-[Timer]
-OnBootSec=5min
-OnUnitActiveSec=${every}
-AccuracySec=1min
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  systemctl enable --now backendmgr-ramrefresh.timer >/dev/null 2>&1 || true
-
-  echo -e "${GRN}✅ RAM refresh programado cada:${NC} ${every}"
-  return 0
-}
-
-ramrefresh_disable() {
-  if ! command -v systemctl >/dev/null 2>&1; then
-    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
-    return 0
-  fi
-  systemctl disable --now backendmgr-ramrefresh.timer >/dev/null 2>&1 || true
-  rm -f /etc/systemd/system/backendmgr-ramrefresh.timer /etc/systemd/system/backendmgr-ramrefresh.service 2>/dev/null || true
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  echo -e "${GRN}✅ RAM refresh desactivado.${NC}"
-  return 0
-}
-
-ramrefresh_status() {
-  if ! command -v systemctl >/dev/null 2>&1; then
-    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
-    return 0
-  fi
-  systemctl status backendmgr-ramrefresh.timer --no-pager 2>/dev/null || true
-  echo
-  systemctl list-timers --all | grep -E 'backendmgr-ramrefresh' || true
-  return 0
-}
-# =================== FIN PATCH FINAL ===================
 main
