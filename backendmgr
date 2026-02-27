@@ -42,16 +42,16 @@ PANEL_LOG="/var/log/backendmgr.panel.log"
 
 # ---- Guardas anti "unbound variable" (set -u) ----
 : "${STATE_DIR:=/var/lib/backendmgr}"
-: "${TRAFFIC_DB_BACKEND:=${STATE_DIR}/traffic_totals_backend.db}"
-: "${TRAFFIC_DB_IP:=${STATE_DIR}/traffic_totals_ip.db}"
+: "${TRAFFIC_DB_BACKEND:=${STATE_DIR}/traffic_backend.db}"
+: "${TRAFFIC_DB_IP:=${STATE_DIR}/traffic_ip.db}"
 : "${TRAFFIC_DB_LAST_RUN:=${STATE_DIR}/traffic_last_run}"
 
 # ------------------ STATE (traffic scanner DB) ------------------
 STATE_DIR="/var/lib/backendmgr"
 RAMREFRESH_LAST_FILE="${STATE_DIR}/ramrefresh.last"
 
-TRAFFIC_DB_IP="${STATE_DIR}/traffic_totals_ip.db"
-TRAFFIC_DB_BACKEND="${STATE_DIR}/traffic_totals_backend.db"
+TRAFFIC_DB_IP="${STATE_DIR}/traffic_ip.db"
+TRAFFIC_DB_BACKEND="${STATE_DIR}/traffic_backend.db"
 TRAFFIC_DB_LAST_RUN="${STATE_DIR}/traffic_last_run"
 
 
@@ -424,22 +424,48 @@ net_totals_line() {
 }
 
 ramrefresh_last_line() {
+  # Muestra: estado ON/OFF + intervalo (si aplica) + último refresco
   local f="${RAMREFRESH_LAST_FILE:-/var/lib/backendmgr/ramrefresh.last}"
+  local last=""
+  [[ -f "$f" ]] && last="$(head -n1 "$f" 2>/dev/null || true)"
 
-  if [[ -f "$f" ]]; then
-    echo "🧹 Último refresco RAM: $(head -n1 "$f" 2>/dev/null)"
-    return 0
-  fi
+  local enabled="OFF"
+  local every=""
 
-  # Si está programado pero todavía no corrió, lo mostramos igual
   if command -v systemctl >/dev/null 2>&1; then
-    if systemctl list-timers --all 2>/dev/null | grep -q 'backendmgr-ramrefresh.timer'; then
-      echo "🧹 Último refresco RAM: (programado)"
-      return 0
+    if systemctl list-unit-files 2>/dev/null | grep -q '^backendmgr-ramrefresh\.timer'; then
+      if systemctl is-enabled backendmgr-ramrefresh.timer >/dev/null 2>&1; then
+        enabled="ON"
+        # intentar leer OnUnitActiveSec
+        every="$(systemctl cat backendmgr-ramrefresh.timer 2>/dev/null | awk -F= '/^OnUnitActiveSec=/{print $2; exit}' | tr -d '
+' || true)"
+      fi
     fi
   fi
 
-  echo "🧹 Último refresco RAM: (nunca)"
+  if [[ "$enabled" == "ON" ]]; then
+    if [[ -n "$every" ]]; then
+      if [[ -n "$last" ]]; then
+        echo "🧹 RAM refresh: ON (${every}) | último: ${last}"
+      else
+        echo "🧹 RAM refresh: ON (${every}) | último: (aún no corrió)"
+      fi
+    else
+      if [[ -n "$last" ]]; then
+        echo "🧹 RAM refresh: ON | último: ${last}"
+      else
+        echo "🧹 RAM refresh: ON | último: (aún no corrió)"
+      fi
+    fi
+    return 0
+  fi
+
+  # OFF
+  if [[ -n "$last" ]]; then
+    echo "🧹 RAM refresh: OFF | último: ${last}"
+  else
+    echo "🧹 RAM refresh: OFF | último: (nunca)"
+  fi
 }
 
 # imprime una línea dentro del recuadro con ancho fijo (respetando emojis/ancho real)
@@ -908,8 +934,8 @@ traffic_scan_run_now() {
   local state_dir="${STATE_DIR:-/var/lib/backendmgr}"
   mkdir -p "$state_dir" 2>/dev/null || true
 
-  local db_backend="${TRAFFIC_DB_BACKEND:-${state_dir}/traffic_totals_backend.db}"
-  local db_ip="${TRAFFIC_DB_IP:-${state_dir}/traffic_totals_ip.db}"
+  local db_backend="${TRAFFIC_DB_BACKEND:-${state_dir}/traffic_backend.db}"
+  local db_ip="${TRAFFIC_DB_IP:-${state_dir}/traffic_ip.db}"
   local last_run="${TRAFFIC_DB_LAST_RUN:-${state_dir}/traffic_last_run.txt}"
 
   local db="$db_backend"
@@ -1021,39 +1047,69 @@ traffic_scan_status() {
 }
 
 traffic_show_from_db() {
-  local mode="$1" # ip|backend
+  # mode: ip | backend
+  local mode="${1:-backend}"
   local db="/var/lib/backendmgr/traffic_totals_backend.db"
-  local title="BACKEND"
-  local w1="22"
+  local last="/var/lib/backendmgr/traffic_last_run.txt"
 
   if [[ "$mode" == "ip" ]]; then
     db="/var/lib/backendmgr/traffic_totals_ip.db"
-    title="IP"
-    w1="18"
   fi
 
-  [[ -f "$db" ]] || { echo -e "${YLW}No hay resumen todavía (db vacío). Esperá 1 ciclo del scanner.${NC}"; return 0; }
+  [[ -f "$db" ]] || { echo -e "${YLW}No hay resumen todavía (db vacío). Ejecutá 11→6 para recalcular o esperá 1 ciclo del scanner.${NC}"; return 0; }
 
+  # Header
   if [[ "$mode" == "ip" ]]; then
-    printf "%-18s %-12s %-10s\n" "IP" "TOTAL(MB)" "REQ"
+    printf "%-18s %-12s %-10s
+" "IP" "TOTAL" "REQ"
     echo "---------------------------------------------"
   else
-    printf "%-22s %-12s %-10s\n" "BACKEND" "TOTAL(MB)" "REQ"
-    echo "---------------------------------------------------"
+    printf "%-22s %-18s %-12s %-10s
+" "BACKEND" "IP:PORT" "TOTAL" "REQ"
+    echo "---------------------------------------------------------------------"
   fi
 
-  # db: key \t bytes \t req
-  awk -F'\t' -v mode="$mode" '
-    {
-      k=$1; b=$2+0; r=$3+0;
-      mb=b/1024/1024;
-      if(mode=="ip"){
-        printf "%-18s %-12.2f %-10d\n", k, mb, r
-      } else {
-        printf "%-22s %-12.2f %-10d\n", k, mb, r
-      }
+  # Build quick lookup for backend->ip:port from backends.map (best-effort)
+  # Map lines are: "name" "http://IP:PORT";
+  local tmp_map
+  tmp_map="$(mktemp)"
+  awk -v q='"' '
+    $0 ~ /^[ 	]*"/ {
+      match($0, /^[ 	]*"([^"]+)"[ 	]+"http:\/\/([^"]+)";/, m)
+      if(m[1] != "" && m[2] != "") print m[1] "	" m[2]
     }
-  ' "$db" | head -n 30 || true
+  ' "$NGX_BACKENDS_MAP" 2>/dev/null > "$tmp_map" || true
+
+  # Normalize DB lines: they may be TAB or PIPE separated: key[|	]bytes[|	]req
+  # We sort by bytes desc to keep it stable even if DB isn't sorted.
+  set +o pipefail
+  awk -F'[|	]' '
+    NF>=3{
+      k=$1; b=$2+0; r=$3+0;
+      gsub(/
+/,"",k);
+      sub(/^[ 	]+/,"",k); sub(/[ 	]+$/,"",k);
+      if(k=="") next;
+      print k "	" b "	" r;
+    }
+  ' "$db" 2>/dev/null | sort -t$'	' -k2,2nr | head -n 30 | while IFS=$'	' read -r k b r; do
+    if [[ "$mode" == "ip" ]]; then
+      printf "%-18s %-12s %-10s
+" "$k" "$(human_bytes "$b")" "$r"
+    else
+      ipport="$(awk -v key="$k" -F'	' '$1==key{print $2; exit}' "$tmp_map" 2>/dev/null || true)"
+      [[ -z "${ipport:-}" ]] && ipport="(sin ip)"
+      printf "%-22s %-18s %-12s %-10s
+" "$k" "$ipport" "$(human_bytes "$b")" "$r"
+    fi
+  done
+  set -o pipefail
+  rm -f "$tmp_map" 2>/dev/null || true
+
+  if [[ -s "$last" ]]; then
+    echo
+    echo -e "${DIM}Último recálculo:${NC} $(head -n1 "$last" 2>/dev/null || true)"
+  fi
   return 0
 }
 
