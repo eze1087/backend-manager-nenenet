@@ -424,49 +424,44 @@ net_totals_line() {
 }
 
 ramrefresh_last_line() {
-  # Muestra: estado ON/OFF + intervalo (si aplica) + último refresco
-  local f="${RAMREFRESH_LAST_FILE:-/var/lib/backendmgr/ramrefresh.last}"
-  local last=""
-  [[ -f "$f" ]] && last="$(head -n1 "$f" 2>/dev/null || true)"
+  local stamp="${RAMREFRESH_LAST_FILE:-/var/lib/backendmgr/ramrefresh.last}"
+  local timer_file="/etc/systemd/system/backendmgr-ramrefresh.timer"
 
-  local enabled="OFF"
-  local every=""
+  local interval=""
+  if [[ -f "$timer_file" ]]; then
+    interval="$(grep -E '^OnUnitActiveSec=' "$timer_file" 2>/dev/null | head -n1 | cut -d= -f2- || true)"
+  fi
 
+  local is_on="OFF"
   if command -v systemctl >/dev/null 2>&1; then
     if systemctl list-unit-files 2>/dev/null | grep -q '^backendmgr-ramrefresh\.timer'; then
-      if systemctl is-enabled backendmgr-ramrefresh.timer >/dev/null 2>&1; then
-        enabled="ON"
-        # intentar leer OnUnitActiveSec
-        every="$(systemctl cat backendmgr-ramrefresh.timer 2>/dev/null | awk -F= '/^OnUnitActiveSec=/{print $2; exit}' | tr -d '
-' || true)"
+      if systemctl is-enabled --quiet backendmgr-ramrefresh.timer 2>/dev/null; then
+        is_on="ON"
       fi
     fi
-  fi
-
-  if [[ "$enabled" == "ON" ]]; then
-    if [[ -n "$every" ]]; then
-      if [[ -n "$last" ]]; then
-        echo "🧹 RAM refresh: ON (${every}) | último: ${last}"
-      else
-        echo "🧹 RAM refresh: ON (${every}) | último: (aún no corrió)"
-      fi
-    else
-      if [[ -n "$last" ]]; then
-        echo "🧹 RAM refresh: ON | último: ${last}"
-      else
-        echo "🧹 RAM refresh: ON | último: (aún no corrió)"
-      fi
-    fi
-    return 0
-  fi
-
-  # OFF
-  if [[ -n "$last" ]]; then
-    echo "🧹 RAM refresh: OFF | último: ${last}"
   else
-    echo "🧹 RAM refresh: OFF | último: (nunca)"
+    # sin systemctl: si existe el timer file asumimos ON
+    [[ -f "$timer_file" ]] && is_on="ON"
   fi
+
+  local last="(nunca)"
+  if [[ -f "$stamp" ]]; then
+    last="$(head -n1 "$stamp" 2>/dev/null || echo "(nunca)")"
+    [[ -z "$last" ]] && last="(nunca)"
+  fi
+
+  if [[ "$is_on" == "ON" ]]; then
+    if [[ -n "$interval" ]]; then
+      echo "🧹 Refresco RAM: ON (cada ${interval}) | último: ${last}"
+    else
+      echo "🧹 Refresco RAM: ON | último: ${last}"
+    fi
+  else
+    echo "🧹 Refresco RAM: OFF | último: ${last}"
+  fi
+  return 0
 }
+
 
 # imprime una línea dentro del recuadro con ancho fijo (respetando emojis/ancho real)
 disp_width() {
@@ -1047,71 +1042,74 @@ traffic_scan_status() {
 }
 
 traffic_show_from_db() {
-  # mode: ip | backend
-  local mode="${1:-backend}"
+  local mode="$1" # ip|backend
   local db="/var/lib/backendmgr/traffic_totals_backend.db"
-  local last="/var/lib/backendmgr/traffic_last_run.txt"
 
   if [[ "$mode" == "ip" ]]; then
     db="/var/lib/backendmgr/traffic_totals_ip.db"
   fi
 
-  [[ -f "$db" ]] || { echo -e "${YLW}No hay resumen todavía (db vacío). Ejecutá 11→6 para recalcular o esperá 1 ciclo del scanner.${NC}"; return 0; }
+  [[ -f "$db" ]] || { echo -e "${YLW}No hay resumen todavía (db vacío). Esperá 1 ciclo del scanner.${NC}"; return 0; }
 
-  # Header
+  # Mapa backend -> ip:port (desde backends.map)
+  local map_tmp=""
+  if [[ "$mode" != "ip" ]]; then
+    map_tmp="$(mktemp)"
+    # backends.map:        "svpnene38" "http://1.2.3.4:80";
+    awk '
+      match($0, /"([^"]+)"[ \t]+"http:\/\/([^"]+)"/, m) { print m[1] "\t" m[2] }
+    ' "$NGX_BACKENDS_MAP" 2>/dev/null | sort -u > "$map_tmp" || true
+  fi
+
   if [[ "$mode" == "ip" ]]; then
-    printf "%-18s %-12s %-10s
-" "IP" "TOTAL" "REQ"
-    echo "---------------------------------------------"
+    printf "%-18s %-12s %-10s\n" "IP" "TOTAL" "REQ"
+    echo "-----------------------------------------------"
   else
-    printf "%-22s %-18s %-12s %-10s
-" "BACKEND" "IP:PORT" "TOTAL" "REQ"
+    printf "%-22s %-18s %-12s %-10s\n" "BACKEND" "IP:PORT" "TOTAL" "REQ"
     echo "---------------------------------------------------------------------"
   fi
 
-  # Build quick lookup for backend->ip:port from backends.map (best-effort)
-  # Map lines are: "name" "http://IP:PORT";
-  local tmp_map
-  tmp_map="$(mktemp)"
-  awk -v q='"' '
-    $0 ~ /^[ 	]*"/ {
-      match($0, /^[ 	]*"([^"]+)"[ 	]+"http:\/\/([^"]+)";/, m)
-      if(m[1] != "" && m[2] != "") print m[1] "	" m[2]
+  # DB puede venir en TAB o en PIPE (key|bytes|req). Lo hacemos robusto.
+  # Mostramos TOTAL en MB/GB (sin perder REQ).
+  awk -v mode="$mode" -v MAP="$map_tmp" '
+    BEGIN{
+      FS="[\t|]"; OFS="\t";
+      # cargar mapa backend->ip:port
+      if(mode!="ip" && MAP!=""){
+        while((getline line < MAP)>0){
+          split(line,a,"\t");
+          if(a[1]!="") mp[a[1]]=a[2];
+        }
+        close(MAP);
+      }
     }
-  ' "$NGX_BACKENDS_MAP" 2>/dev/null > "$tmp_map" || true
-
-  # Normalize DB lines: they may be TAB or PIPE separated: key[|	]bytes[|	]req
-  # We sort by bytes desc to keep it stable even if DB isn't sorted.
-  set +o pipefail
-  awk -F'[|	]' '
     NF>=3{
       k=$1; b=$2+0; r=$3+0;
-      gsub(/
-/,"",k);
-      sub(/^[ 	]+/,"",k); sub(/[ 	]+$/,"",k);
+      gsub(/\r/,"",k);
+      sub(/^[[:space:]]+/,"",k); sub(/[[:space:]]+$/,"",k);
       if(k=="") next;
-      print k "	" b "	" r;
-    }
-  ' "$db" 2>/dev/null | sort -t$'	' -k2,2nr | head -n 30 | while IFS=$'	' read -r k b r; do
-    if [[ "$mode" == "ip" ]]; then
-      printf "%-18s %-12s %-10s
-" "$k" "$(human_bytes "$b")" "$r"
-    else
-      ipport="$(awk -v key="$k" -F'	' '$1==key{print $2; exit}' "$tmp_map" 2>/dev/null || true)"
-      [[ -z "${ipport:-}" ]] && ipport="(sin ip)"
-      printf "%-22s %-18s %-12s %-10s
-" "$k" "$ipport" "$(human_bytes "$b")" "$r"
-    fi
-  done
-  set -o pipefail
-  rm -f "$tmp_map" 2>/dev/null || true
 
-  if [[ -s "$last" ]]; then
-    echo
-    echo -e "${DIM}Último recálculo:${NC} $(head -n1 "$last" 2>/dev/null || true)"
-  fi
+      # convertir bytes -> human
+      mb=b/1024/1024;
+      if(mb>=1024){
+        total=sprintf("%.2f GB", mb/1024);
+      } else {
+        total=sprintf("%.2f MB", mb);
+      }
+
+      if(mode=="ip"){
+        printf "%-18s %-12s %-10d\n", k, total, r;
+      } else {
+        ipport=(k in mp)? mp[k] : "-";
+        printf "%-22s %-18s %-12s %-10d\n", k, ipport, total, r;
+      }
+    }
+  ' "$db" 2>/dev/null | head -n 50 || true
+
+  [[ -n "$map_tmp" ]] && rm -f "$map_tmp" 2>/dev/null || true
   return 0
 }
+
 
 traffic_scan_menu() {
   read_cfg
