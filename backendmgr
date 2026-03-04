@@ -537,6 +537,11 @@ ensure_http_conf_maps() {
 # ${APP_NAME} (http{})
 include ${NGX_LOGGING_SNIP};
 
+# ✅ Resolver para backends por dominio/host (proxy_pass con variables)
+# Necesario para que Nginx resuelva hostnames cuando el destino viene en una variable.
+resolver 1.1.1.1 8.8.8.8 valid=60s ipv6=off;
+resolver_timeout 3s;
+
 # resolver para backends por dominio (proxy_pass con variables)
 resolver 1.1.1.1 8.8.8.8 valid=300s ipv6=off;
 resolver_timeout 5s;
@@ -553,6 +558,39 @@ map \$backend_url \$url_limit_rate { default 0; include ${NGX_LIMITS_URL}; }
 map \$backend_limit_rate \$nenenet_rate_step1 {
   default \$backend_limit_rate;
   0 \$url_limit_rate;
+}
+
+# ✅ Asegura 'resolver' en backendmgr.conf para backends por dominio (sin pisar el archivo entero)
+ensure_resolver_in_backendmgr_conf() {
+  [[ -f "$NGX_MAIN_INCLUDE" ]] || return 0
+  if grep -qE '^[ \t]*resolver[ \t]+' "$NGX_MAIN_INCLUDE" 2>/dev/null; then
+    return 0
+  fi
+
+  # Insertar después del include logging.conf (si existe), si no, al principio.
+  local tmp
+  tmp="$(mktemp)"
+  awk '
+    BEGIN{ins=0}
+    {print}
+    ins==0 && $0 ~ /^include[ \t]+.*logging\.conf;/ {
+      print ""
+      print "# ✅ Resolver para backends por dominio/host (proxy_pass con variables)"
+      print "resolver 1.1.1.1 8.8.8.8 valid=60s ipv6=off;"
+      print "resolver_timeout 3s;"
+      ins=1
+    }
+    END{
+      if(ins==0){
+        print ""
+        print "# ✅ Resolver para backends por dominio/host (proxy_pass con variables)"
+        print "resolver 1.1.1.1 8.8.8.8 valid=60s ipv6=off;"
+        print "resolver_timeout 3s;"
+      }
+    }
+  ' "$NGX_MAIN_INCLUDE" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+  mv "$tmp" "$NGX_MAIN_INCLUDE"
+  return 0
 }
 map \$nenenet_rate_step1 \$nenenet_rate {
   default \$nenenet_rate_step1;
@@ -1452,7 +1490,9 @@ server {
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
 
-        proxy_set_header Host \$host;
+        # ✅ Si el backend se define por dominio/host, este header debe coincidir con el upstream.
+        # $proxy_host toma el host del proxy_pass (IP o dominio del backend).
+        proxy_set_header Host \$proxy_host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
@@ -2444,6 +2484,7 @@ main() {
   read_cfg
 
   ensure_http_conf_maps
+  ensure_resolver_in_backendmgr_conf >/dev/null 2>&1 || true
   ensure_mothers_include
   write_apply_conf >/dev/null 2>&1 || true
   rebuild_balancer_files >/dev/null 2>&1 || true
