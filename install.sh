@@ -4,6 +4,8 @@ set -euo pipefail
 APP_NAME="Backend Manager Nenenet 3.0"
 PANEL_URL="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main/backendmgr"
 PANEL_DST="/usr/local/bin/backendmgr"
+UNINSTALL_URL="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main/uninstall.sh"
+UNINSTALL_DST="/usr/local/bin/backendmgr-uninstall"
 
 CFG_DIR="/etc/backendmgr"
 CFG_FILE="${CFG_DIR}/config.json"
@@ -30,10 +32,52 @@ BACKUP_DIR="/etc/nginx/backendmgr-backups"
 
 need_root(){ [[ ${EUID:-999} -eq 0 ]] || { echo "ERROR: ejecutá con sudo."; exit 1; }; }
 
+# Permite desinstalar usando el mismo entrypoint:
+#   curl -fsSL <install.sh> | sudo bash -s uninstall
+if [[ "${1:-}" == "uninstall" ]]; then
+  echo "[UNINSTALL] Ejecutando desinstalación..."
+  if [[ -x "${UNINSTALL_DST}" ]]; then
+    "${UNINSTALL_DST}" || true
+    exit 0
+  fi
+  curl -fsSL "${UNINSTALL_URL}" | bash
+  exit 0
+fi
+
+
+
 backup_file(){
   local f="$1"
   mkdir -p "$BACKUP_DIR"
-  [[ -e "$f" ]] && cp -a "$f" "${BACKUP_DIR}/$(basename "$f").bak-$(date +%Y%m%d-%H%M%S)" || true
+  if [[ -e "$f" ]]; then
+    local b="${BACKUP_DIR}/$(basename "$f").bak-$(date +%Y%m%d-%H%M%S)"
+    cp -a "$f" "$b" || true
+
+    # ✅ Limpieza: no llenar el disco
+    # - Borra backups de +30 días
+    find "$BACKUP_DIR" -maxdepth 1 -type f -name "$(basename "$f").bak-*" -mtime +30 -delete 2>/dev/null || true
+    # - Deja solo los últimos 15 por archivo (por si hay muchas instalaciones seguidas)
+    ls -1t "$BACKUP_DIR/$(basename "$f").bak-"* 2>/dev/null | tail -n +16 | xargs -r rm -f 2>/dev/null || true
+  fi
+}
+
+prune_backups(){
+  # Limpieza simple para que los .bak no llenen el disco
+  # - borra nginx.conf.bak-* y nginx.sbin.bak-* de más de 30 días
+  # - y conserva como máximo los últimos 60 (por si querés volver atrás)
+  local days=\"${BACKENDMGR_PRUNE_DAYS:-30}\"
+  local keep=\"${BACKENDMGR_KEEP_BAKS:-60}\"
+  mkdir -p \"$BACKUP_DIR\" 2>/dev/null || true
+
+  # borrar por antigüedad
+  find \"$BACKUP_DIR\" -maxdepth 1 -type f \( -name 'nginx.conf.bak-*' -o -name 'nginx.sbin.bak-*' -o -name 'nginx.conf.bak_*' \) -mtime \"+${days}\" -print -delete 2>/dev/null || true
+
+  # limitar cantidad (si hay cientos, recorta a 'keep')
+  local cnt
+  cnt=$(ls -1t \"$BACKUP_DIR\"/nginx.conf.bak-* \"$BACKUP_DIR\"/nginx.sbin.bak-* 2>/dev/null | wc -l | tr -d ' ' || true)
+  if [[ \"${cnt:-0}\" =~ ^[0-9]+$ ]] && (( cnt > keep )); then
+    ls -1t \"$BACKUP_DIR\"/nginx.conf.bak-* \"$BACKUP_DIR\"/nginx.sbin.bak-* 2>/dev/null | tail -n \"$((cnt-keep))\" | xargs -r rm -f
+  fi
 }
 
 write_default_cfg(){
@@ -138,19 +182,22 @@ EOF
 }
 
 write_backendmgr_conf_full(){
-  cat > "$NGX_MAIN_INCLUDE" <<EOF
+  
+      cat > "$NGX_MAIN_INCLUDE" <<EOF
 # ${APP_NAME} (http{})
 include ${NGX_LOGGING_SNIP};
 
-# rate-limit zones (valores reales los aplica apply.conf)
+# DNS resolver (necesario si usás dominios/hosts en proxy_pass con variables)
+resolver 1.1.1.1 8.8.8.8 valid=30s ipv6=off;
+resolver_timeout 5s;
+
+
+# rate-limit zones
 limit_req_zone \$binary_remote_addr zone=backendmgr_req:10m rate=10r/s;
 limit_conn_zone \$binary_remote_addr zone=backendmgr_conn:10m;
 
-# balancer legacy
+# balancer conf
 include ${NGX_BALANCER_CONF};
-
-# mothers upstreams (si está vacío no pasa nada)
-include ${NGX_MOTHERS_UPSTREAMS};
 
 # speed-limit maps
 map \$remote_addr \$ip_limit_rate { default 0; include ${NGX_LIMITS_IP}; }
@@ -166,7 +213,6 @@ map \$nenenet_rate_step1 \$nenenet_rate {
   0 \$ip_limit_rate;
 }
 
-# ✅ IMPORTANTÍSIMO: variable usada por targets/*.conf
 map \$backendmgr_balance \$nenenet_backend_url {
   0 \$backend_url;
   1 \$balanced_backend_url;
@@ -232,6 +278,37 @@ ensure_backendmgr_conf(){
   fi
 }
 
+ensure_backendmgr_resolver(){
+  # Asegura "resolver" en backendmgr.conf (requerido si backend_url apunta a un HOST y proxy_pass usa variables)
+  if [[ ! -f "$NGX_MAIN_INCLUDE" ]]; then return 0; fi
+  if grep -qE '^[ \t]*resolver[ \t]+' "$NGX_MAIN_INCLUDE" 2>/dev/null; then
+    return 0
+  fi
+  backup_file "$NGX_MAIN_INCLUDE"
+  awk '
+    BEGIN{done=0}
+    {
+      print
+      if(done==0 && $0 ~ /include[ \t]+.*logging\.conf;|include[ \t]+.*NGX_LOGGING_SNIP/){
+        print ""
+        print "# DNS resolver (auto) - requerido para hostnames en proxy_pass con variables"
+        print "resolver 1.1.1.1 8.8.8.8 valid=30s ipv6=off;"
+        print "resolver_timeout 5s;"
+        print ""
+        done=1
+      }
+    }
+    END{
+      if(done==0){
+        print ""
+        print "# DNS resolver (auto) - requerido para hostnames en proxy_pass con variables"
+        print "resolver 1.1.1.1 8.8.8.8 valid=30s ipv6=off;"
+        print "resolver_timeout 5s;"
+      }
+    }
+  ' "$NGX_MAIN_INCLUDE" > "${NGX_MAIN_INCLUDE}.tmp" && mv "${NGX_MAIN_INCLUDE}.tmp" "$NGX_MAIN_INCLUDE"
+}
+
 ensure_nginx_conf_include(){
   local nginx_conf="/etc/nginx/nginx.conf"
   backup_file "$nginx_conf"
@@ -272,17 +349,46 @@ http {
 EOF
 }
 
+ensure_real_nginx_binary(){
+  local SBIN="/usr/sbin/nginx"
+  local REAL="/usr/sbin/nginx.real"
+
+  # (FIX) No recursión: esta función solo repara/asegura nginx.real
+
+  # Si ya existe, OK
+  if [[ -x "$REAL" ]]; then return 0; fi
+
+  # Si nginx actual es un wrapper y no tenemos .real, reinstalamos para recuperar el binario
+  if [[ -x "$SBIN" ]] && head -c 2 "$SBIN" 2>/dev/null | grep -q '^#!'; then
+    echo "[fix] nginx.real no existe. Reinstalando nginx para recuperar binario..."
+    apt-get install --reinstall -y nginx >/dev/null 2>&1 || true
+  fi
+
+  # Si ahora nginx es binario ELF, lo movemos a nginx.real
+  if [[ ! -x "$REAL" && -x "$SBIN" ]]; then
+    if head -c 4 "$SBIN" 2>/dev/null | od -An -t x1 | tr -d ' \n' | grep -qi '^7f454c46'; then
+      cp -a "$SBIN" "${BACKUP_DIR}/nginx.sbin.recovered-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+      mv "$SBIN" "$REAL"
+    fi
+  fi
+
+  [[ -x "$REAL" ]] || return 0
+  return 0
+}
+
 install_wrapper_nginx(){
   echo "[6/8] Wrapper nginx (nginx abre menú)..."
   local SBIN="/usr/sbin/nginx"
   local REAL="/usr/sbin/nginx.real"
+
+  ensure_real_nginx_binary
 
   if [[ -x "$SBIN" && ! -x "$REAL" ]]; then
     cp -a "$SBIN" "${BACKUP_DIR}/nginx.sbin.bak-$(date +%Y%m%d-%H%M%S)" || true
     mv "$SBIN" "$REAL"
   fi
 
-  cat > "$SBIN" <<'WRAP'
+cat > "$SBIN" <<'WRAP'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -304,6 +410,7 @@ run_panel() {
     return 127
   fi
 
+  # no morir por set -e si el panel sale rc!=0
   set +e
   if [[ -r /dev/tty && -w /dev/tty ]]; then
     </dev/tty >/dev/tty 2>&1 "$PANEL"
@@ -316,10 +423,13 @@ run_panel() {
 
   log "PANEL_EXIT rc=$rc"
 
-  if [[ -r /dev/tty && -w /dev/tty ]]; then
-    echo "" >/dev/tty
-    echo "⚠️ El panel terminó (rc=$rc). Log: $LOG" >/dev/tty
-    read -r -p "Enter para volver..." _ </dev/tty || true
+  # ✅ SOLO avisar si hubo error (rc != 0)
+  if [[ "${rc:-0}" -ne 0 ]]; then
+    if [[ -r /dev/tty && -w /dev/tty ]]; then
+      echo "" >/dev/tty
+      echo "⚠️ El panel terminó (rc=$rc). Log: $LOG" >/dev/tty
+      read -r -p "Enter para volver..." _ </dev/tty || true
+    fi
   fi
 
   return "$rc"
@@ -367,6 +477,7 @@ main(){
   write_snippets_if_missing
   ensure_backendmgr_conf
 
+  ensure_backendmgr_resolver
   echo "[5/8] nginx.conf include..."
   ensure_nginx_conf_include
 
@@ -375,6 +486,8 @@ main(){
   nginx -s reload >/dev/null 2>&1 || true
 
   install_wrapper_nginx
+
+  prune_backups || true
 
   echo "[8/8] ✅ Listo. Abrir panel con: nginx  (o sudo nginx)"
 }
