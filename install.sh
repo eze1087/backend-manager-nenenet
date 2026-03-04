@@ -142,9 +142,9 @@ write_backendmgr_conf_full(){
 # ${APP_NAME} (http{})
 include ${NGX_LOGGING_SNIP};
 
-# ✅ Resolver para backends por dominio/host (proxy_pass con variables)
-resolver 1.1.1.1 8.8.8.8 valid=60s ipv6=off;
-resolver_timeout 3s;
+# backendmgr: resolver para hostnames en proxy_pass con variables
+resolver 1.1.1.1 8.8.8.8 valid=300s ipv6=off;
+resolver_timeout 5s;
 
 # rate-limit zones (valores reales los aplica apply.conf)
 limit_req_zone \$binary_remote_addr zone=backendmgr_req:10m rate=10r/s;
@@ -179,33 +179,6 @@ map \$backendmgr_balance \$nenenet_backend_url {
 # servers
 include ${SERVERS_DIR}/*.conf;
 EOF
-}
-
-ensure_resolver_in_backendmgr_conf(){
-  [[ -f "$NGX_MAIN_INCLUDE" ]] || return 0
-  if grep -qE '^[ \t]*resolver[ \t]+' "$NGX_MAIN_INCLUDE" 2>/dev/null; then
-    return 0
-  fi
-  backup_file "$NGX_MAIN_INCLUDE"
-  awk '
-    BEGIN{ins=0}
-    {print}
-    ins==0 && $0 ~ /^include[ \t]+.*logging\.conf;/ {
-      print ""
-      print "# ✅ Resolver para backends por dominio/host (proxy_pass con variables)"
-      print "resolver 1.1.1.1 8.8.8.8 valid=60s ipv6=off;"
-      print "resolver_timeout 3s;"
-      ins=1
-    }
-    END{
-      if(ins==0){
-        print ""
-        print "# ✅ Resolver para backends por dominio/host (proxy_pass con variables)"
-        print "resolver 1.1.1.1 8.8.8.8 valid=60s ipv6=off;"
-        print "resolver_timeout 3s;"
-      }
-    }
-  ' "$NGX_MAIN_INCLUDE" > "${NGX_MAIN_INCLUDE}.tmp" && mv "${NGX_MAIN_INCLUDE}.tmp" "$NGX_MAIN_INCLUDE"
 }
 
 ensure_backendmgr_conf(){
@@ -262,6 +235,30 @@ ensure_backendmgr_conf(){
     ' "$NGX_MAIN_INCLUDE" > "${NGX_MAIN_INCLUDE}.tmp" && mv "${NGX_MAIN_INCLUDE}.tmp" "$NGX_MAIN_INCLUDE"
   fi
 }
+
+ensure_backendmgr_resolver() {
+  [[ -f "$NGX_MAIN_INCLUDE" ]] || return 0
+  if grep -qE '^\s*resolver\s+' "$NGX_MAIN_INCLUDE" 2>/dev/null; then
+    return 0
+  fi
+  backup_file "$NGX_MAIN_INCLUDE"
+  if grep -qF "include ${NGX_LOGGING_SNIP};" "$NGX_MAIN_INCLUDE" 2>/dev/null; then
+    awk -v inc="include ${NGX_LOGGING_SNIP};" '
+      {
+        print
+        if($0==inc){
+          print ""
+          print "# backendmgr: resolver para hostnames en proxy_pass con variables"
+          print "resolver 1.1.1.1 8.8.8.8 valid=300s ipv6=off;"
+          print "resolver_timeout 5s;"
+        }
+      }' "$NGX_MAIN_INCLUDE" > "${NGX_MAIN_INCLUDE}.tmp" && mv "${NGX_MAIN_INCLUDE}.tmp" "$NGX_MAIN_INCLUDE"
+  else
+    printf "\n# backendmgr: resolver para hostnames en proxy_pass con variables\nresolver 1.1.1.1 8.8.8.8 valid=300s ipv6=off;\nresolver_timeout 5s;\n" >> "$NGX_MAIN_INCLUDE"
+  fi
+  return 0
+}
+
 
 ensure_nginx_conf_include(){
   local nginx_conf="/etc/nginx/nginx.conf"
@@ -397,7 +394,7 @@ main(){
   echo "[4/8] Snippets..."
   write_snippets_if_missing
   ensure_backendmgr_conf
-  ensure_resolver_in_backendmgr_conf
+  ensure_backendmgr_resolver
 
   echo "[5/8] nginx.conf include..."
   ensure_nginx_conf_include
