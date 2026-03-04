@@ -529,10 +529,9 @@ ensure_http_conf_maps() {
 # ${APP_NAME} (http{})
 include ${NGX_LOGGING_SNIP};
 
-# DNS resolver (necesario si usás dominios/hosts en proxy_pass con variables)
-resolver 1.1.1.1 8.8.8.8 valid=30s ipv6=off;
+# resolver para backends por dominio (proxy_pass con variables)
+resolver 1.1.1.1 8.8.8.8 valid=300s ipv6=off;
 resolver_timeout 5s;
-
 
 limit_req_zone \$binary_remote_addr zone=backendmgr_req:10m rate=10r/s;
 limit_conn_zone \$binary_remote_addr zone=backendmgr_conn:10m;
@@ -1610,19 +1609,38 @@ domains_menu() {
 
 # ------------------ BACKENDS ------------------
 add_backend() {
-  echo -e "${CYA}Agregar backend (nombre + IP + puerto)${NC}"
-  echo -e "${DIM}Ejemplo: svpnene38 -> 179.43.112.38:80${NC}\n"
+  echo -e "${CYA}Agregar backend (nombre + destino + puerto)${NC}"
+  echo -e "${DIM}Ejemplo: svpnene38 -> 179.43.112.38:80  (o svpnene38 -> host.mi-dominio.com:80)${NC}\n"
 
   read -r -p "Nombre del backend (ej: svpnene38): " key
   validate_key "$key" || { echo -e "${RED}Nombre inválido.${NC}"; return 0; }
 
-  read -r -p "IP (ej: 179.43.112.38): " ip
-  validate_ip "$ip" || { echo -e "${RED}IP inválida.${NC}"; return 0; }
+  echo
+  echo -e "${CYA}Destino del backend:${NC}"
+  echo " 1) IP (ej: 179.43.112.38)"
+  echo " 2) Dominio/Host (ej: host.mi-dominio.com)"
+  read -r -p "Opción (1/2): " dtype
+
+  local host=""
+  case "$dtype" in
+    1)
+      read -r -p "IP (ej: 179.43.112.38): " host
+      validate_ip "$host" || { echo -e "${RED}IP inválida.${NC}"; return 0; }
+      ;;
+    2)
+      read -r -p "Dominio/Host (ej: host.mi-dominio.com): " host
+      validate_host "$host" || { echo -e "${RED}Host/Dominio inválido.${NC}"; return 0; }
+      ;;
+    *)
+      echo -e "${YLW}Opción inválida.${NC}"
+      return 0
+      ;;
+  esac
 
   read -r -p "Puerto (ej: 80): " port
   [[ "$port" =~ ^[0-9]{2,5}$ ]] || { echo -e "${RED}Puerto inválido.${NC}"; return 0; }
 
-  local url="http://${ip}:${port}"
+  local url="http://${host}:${port}"
 
   if grep -qE "^\s*\"${key}\"" "$NGX_BACKENDS_MAP"; then
     awk -v k="$key" -v url="$url" '
@@ -1630,10 +1648,10 @@ add_backend() {
         if($0~re){ sub(/\"http:\\/\\/[^\\\"]+\"/, "\""url"\"") }
         print
       }' "$NGX_BACKENDS_MAP" > "${NGX_BACKENDS_MAP}.tmp" && mv "${NGX_BACKENDS_MAP}.tmp" "$NGX_BACKENDS_MAP"
-    echo -e "${GRN}✅ Actualizado:${NC} $key -> $ip:$port"
+    echo -e "${GRN}✅ Actualizado:${NC} $key -> ${host}:${port}"
   else
     printf "        \"%s\" \"%s\";\n" "$key" "$url" >> "$NGX_BACKENDS_MAP"
-    echo -e "${GRN}✅ Agregado:${NC} $key -> $ip:$port"
+    echo -e "${GRN}✅ Agregado:${NC} $key -> ${host}:${port}"
   fi
 
   rebuild_balancer_files
@@ -1646,7 +1664,7 @@ add_backend() {
 
 list_backends() {
   echo -e "${CYA}Backends (backend / IP / puerto)${NC}\n"
-  printf "%-4s %-22s %-18s %-6s\n" "#" "BACKEND" "IP" "PORT"
+  printf "%-4s %-22s %-28s %-6s\n" "#" "BACKEND" "HOST" "PORT"
   echo "--------------------------------------------------------------"
   local i=0
 
@@ -1656,7 +1674,7 @@ list_backends() {
     key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
     url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
     ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
-    printf "%-4s %-22s %-18s %-6s\n" "$i" "$key" "$ip" "$port"
+    printf "%-4s %-22s %-28s %-6s\n" "$i" "$key" "$ip" "$port"
   done < <(backend_lines)
 
   if [[ "$i" -eq 0 ]]; then
