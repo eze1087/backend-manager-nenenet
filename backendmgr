@@ -631,6 +631,38 @@ EOF
 }
 
 # ------------------ APPLY.CONF ------------------
+
+
+# ------------------ DNS resolver (para backends por DOMINIO con proxy_pass variable) ------------------
+ensure_resolver_in_backendmgr_conf() {
+  # Nginx necesita "resolver" cuando proxy_pass usa variables y el destino es un hostname (dominio).
+  # Lo ponemos en el include http{} (backendmgr.conf) para que aplique a todos los servers.
+  [[ -f "$NGX_MAIN_INCLUDE" ]] || return 0
+
+  # si ya existe, no tocamos
+  if grep -qE '^[[:space:]]*resolver[[:space:]]+' "$NGX_MAIN_INCLUDE" 2>/dev/null; then
+    return 0
+  fi
+
+  # tomar DNS de /etc/resolv.conf (nameserver) y fallback a públicos
+  local ns
+  ns="$(awk '/^nameserver[[:space:]]+/{print $2}' /etc/resolv.conf 2>/dev/null | head -n 2 | tr '\n' ' ' | sed -E 's/[[:space:]]+$//')"
+  [[ -z "${ns:-}" ]] && ns="1.1.1.1 8.8.8.8"
+
+  # insertamos al principio del archivo (backendmgr.conf se incluye dentro de http{})
+  local tmp
+  tmp="$(mktemp)"
+  {
+    echo "# backendmgr auto: resolver para hostnames en proxy_pass variables"
+    echo "resolver ${ns} valid=300s ipv6=off;"
+    echo
+    cat "$NGX_MAIN_INCLUDE"
+  } > "$tmp" && mv "$tmp" "$NGX_MAIN_INCLUDE"
+
+  nginx_test_reload
+  return 0
+}
+
 write_apply_conf() {
   read_cfg
 
