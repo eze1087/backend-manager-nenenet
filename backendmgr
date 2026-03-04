@@ -529,6 +529,11 @@ ensure_http_conf_maps() {
 # ${APP_NAME} (http{})
 include ${NGX_LOGGING_SNIP};
 
+# DNS resolver (necesario si usás dominios/hosts en proxy_pass con variables)
+resolver 1.1.1.1 8.8.8.8 valid=30s ipv6=off;
+resolver_timeout 5s;
+
+
 limit_req_zone \$binary_remote_addr zone=backendmgr_req:10m rate=10r/s;
 limit_conn_zone \$binary_remote_addr zone=backendmgr_conn:10m;
 
@@ -1606,34 +1611,18 @@ domains_menu() {
 # ------------------ BACKENDS ------------------
 add_backend() {
   echo -e "${CYA}Agregar backend (nombre + IP + puerto)${NC}"
-  echo -e "${DIM}Ejemplo: svpnene38 -> 179.43.112.38:80  (o svpnene38 -> host.mi-dominio.com:80)${NC}\n"
+  echo -e "${DIM}Ejemplo: svpnene38 -> 179.43.112.38:80${NC}\n"
 
   read -r -p "Nombre del backend (ej: svpnene38): " key
   validate_key "$key" || { echo -e "${RED}Nombre inválido.${NC}"; return 0; }
 
-  echo
-  echo -e "${CYA}Destino del backend:${NC}"
-  echo " 1) IP (ej: 179.43.112.38)"
-  echo " 2) Dominio/Host (ej: host.mi-dominio.com)"
-  read -r -p "Opción (1/2): " destop
-  echo
-
-  local host
-  case "$destop" in
-    2)
-      read -r -p "Dominio/Host (ej: host.mi-dominio.com): " host
-      validate_domain "$host" || { echo -e "${RED}Dominio/Host inválido.${NC}"; return 0; }
-      ;;
-    1|*)
-      read -r -p "IP (ej: 179.43.112.38): " host
-      validate_ip "$host" || { echo -e "${RED}IP inválida.${NC}"; return 0; }
-      ;;
-  esac
+  read -r -p "IP (ej: 179.43.112.38): " ip
+  validate_ip "$ip" || { echo -e "${RED}IP inválida.${NC}"; return 0; }
 
   read -r -p "Puerto (ej: 80): " port
   [[ "$port" =~ ^[0-9]{2,5}$ ]] || { echo -e "${RED}Puerto inválido.${NC}"; return 0; }
 
-  local url="http://${host}:${port}"
+  local url="http://${ip}:${port}"
 
   if grep -qE "^\s*\"${key}\"" "$NGX_BACKENDS_MAP"; then
     awk -v k="$key" -v url="$url" '
@@ -1641,10 +1630,10 @@ add_backend() {
         if($0~re){ sub(/\"http:\\/\\/[^\\\"]+\"/, "\""url"\"") }
         print
       }' "$NGX_BACKENDS_MAP" > "${NGX_BACKENDS_MAP}.tmp" && mv "${NGX_BACKENDS_MAP}.tmp" "$NGX_BACKENDS_MAP"
-    echo -e "${GRN}✅ Actualizado:${NC} $key -> $host:$port"
+    echo -e "${GRN}✅ Actualizado:${NC} $key -> $ip:$port"
   else
     printf "        \"%s\" \"%s\";\n" "$key" "$url" >> "$NGX_BACKENDS_MAP"
-    echo -e "${GRN}✅ Agregado:${NC} $key -> $host:$port"
+    echo -e "${GRN}✅ Agregado:${NC} $key -> $ip:$port"
   fi
 
   rebuild_balancer_files
@@ -1954,26 +1943,6 @@ restore_bundle() {
 
   echo -e "${GRN}✅ Restaurado y recargado Nginx.${NC}"
   return 0
-}
-
-backup_restore_menu() {
-  while true; do
-    echo -e "${CYA}💾 Backup y restauración${NC}"
-    echo " 1) Crear backup (bundle .tar.gz)"
-    echo " 2) Restaurar backup (elige .tar.gz)"
-    echo " 3) Listar backups"
-    echo " 0) Volver"
-    echo
-    read -r -p "Opción: " op
-    echo
-    case "$op" in
-      1) backup_bundle; pause ;;
-      2) restore_bundle; pause ;;
-      3) ls -1t "${BACKUP_DIR}"/bundle-*.tar.gz 2>/dev/null | nl -w2 -s') ' || echo "No hay backups."; pause ;;
-      0) return 0 ;;
-      *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
-    esac
-  done
 }
 
 # ------------------ Servicios Nginx ------------------
@@ -2432,7 +2401,8 @@ menu() {
   echo " 10) 🚦 Limitar ancho de banda por IP o Backend (limit_rate)"
   echo " 11) 📊 Tráfico por IP / Backend (stats log + scanner)"
   echo " 12) 🔥 Firewall UFW: abrir puerto (80/443/otro)"
-  echo " 13) 💾 Backup y restauración"
+  echo " 13) 💾 Backup"
+  echo " 14) ♻️  Restaurar backup"
   echo " 15) ⚙️  Servicios de Nginx (Status/Stop/Start/Reload/Restart)"
   echo " 16) 🚀 Speedtest (Ping / Bajada / Subida)"
   echo " 17) 🧰 Mantenimiento programado (RAM / Nginx timers)"
@@ -2483,8 +2453,8 @@ main() {
      10) speed_limit_menu; pause ;;
      11) traffic_stats; pause ;;
      12) ufw_open_port; pause ;;
-     13) backup_restore_menu ;;
-     14) backup_restore_menu ;; # compat: por si alguien lo usaba
+     13) backup_bundle; pause ;;
+     14) restore_bundle; pause ;;
      15) nginx_services_menu; pause ;;
      16) speedtest_menu; pause ;;
      17) maintenance_menu; pause ;;
