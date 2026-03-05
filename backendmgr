@@ -470,7 +470,6 @@ ramrefresh_last_line() {
   return 0
 }
 
-}
 
 
 # imprime una línea dentro del recuadro con ancho fijo (respetando emojis/ancho real)
