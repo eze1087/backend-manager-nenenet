@@ -1124,6 +1124,36 @@ traffic_show_from_db() {
 }
 
 
+
+traffic_totals_reset_menu() {
+  read_cfg
+  echo -e "${CYA}Borrar totales acumulados del scanner${NC}"
+  echo -e "${DIM}Esto borra SOLO el resumen acumulado (DB + estado).${NC}"
+  echo -e "${DIM}No borra el log: ${STATS_LOG}${NC}"
+  echo
+  echo "Archivos:"
+  echo "  /var/lib/backendmgr/traffic_totals_backend.db"
+  echo "  /var/lib/backendmgr/traffic_totals_ip.db"
+  echo "  /var/lib/backendmgr/traffic_scan.state"
+  echo "  /var/lib/backendmgr/traffic_last_run"
+  echo
+  read -r -p "¿Confirmás borrar el acumulado? (s/N): " yn
+  case "${yn:-}" in
+    s|S|si|SI|Si)
+      rm -f /var/lib/backendmgr/traffic_totals_backend.db \
+            /var/lib/backendmgr/traffic_totals_ip.db \
+            /var/lib/backendmgr/traffic_scan.state \
+            /var/lib/backendmgr/traffic_last_run 2>/dev/null || true
+      echo -e "${GRN}✅ Acumulado borrado.${NC}"
+      echo -e "${DIM}Tip: usá Opción 11 → 6 para recalcular desde TODO el log.${NC}"
+      ;;
+    *)
+      echo -e "${YLW}Cancelado.${NC}"
+      ;;
+  esac
+  return 0
+}
+
 traffic_scan_menu() {
   read_cfg
   echo -e "${CYA}Escaneo permanente de tráfico (scanner)${NC}"
@@ -1869,6 +1899,7 @@ traffic_stats() {
   echo "4) Desactivar logging de tráfico (stats)"
   echo "5) ⚙️  Escaneo permanente (scanner): menú"
   echo "6) 📌 Totales acumulados (recalcular y mostrar)"
+  echo "7) 🗑️  Borrar totales acumulados (DB/estado)"
   echo "0) Volver"
   read -r -p "Opción: " op
   echo
@@ -1908,6 +1939,11 @@ traffic_stats() {
         2) traffic_scan_run_now "backend"; echo; traffic_show_from_db "backend" ;;
         *) echo -e "${YLW}Opción inválida.${NC}" ;;
       esac
+      return 0
+      ;;
+
+    7)
+      traffic_totals_reset_menu
       return 0
       ;;
 
