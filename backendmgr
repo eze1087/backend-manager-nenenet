@@ -42,8 +42,8 @@ PANEL_LOG="/var/log/backendmgr.panel.log"
 
 # ---- Guardas anti "unbound variable" (set -u) ----
 : "${STATE_DIR:=/var/lib/backendmgr}"
-: "${TRAFFIC_DB_BACKEND:=${STATE_DIR}/traffic_totals_backend.db}"
-: "${TRAFFIC_DB_IP:=${STATE_DIR}/traffic_totals_ip.db}"
+: "${TRAFFIC_DB_BACKEND:=${STATE_DIR}/traffic_backend.db}"
+: "${TRAFFIC_DB_IP:=${STATE_DIR}/traffic_ip.db}"
 : "${TRAFFIC_DB_LAST_RUN:=${STATE_DIR}/traffic_last_run}"
 
 # ------------------ STATE (traffic scanner DB) ------------------
@@ -423,6 +423,51 @@ net_totals_line() {
   echo "📡 NET: ⬇️ $(human_bytes "$rx") | ⬆️ $(human_bytes "$tx") (desde boot)"
 }
 
+nginx_sched_banner_info() {
+  # Devuelve info breve de nginx reload/restart programado y último run
+  local out=""
+  local actions=("reload" "restart")
+  local a
+  for a in "${actions[@]}"; do
+    local tmr="/etc/systemd/system/backendmgr-nginx-${a}.timer"
+    local interval="" last="(nunca)" state="OFF"
+
+    if [[ -f "$tmr" ]]; then
+      interval="$(grep -E '^OnUnitActiveSec=' "$tmr" 2>/dev/null | head -n1 | cut -d= -f2- || true)"
+      # auto-heal: si existe unit file pero systemd no lo ve aún, recarga daemon
+      if have_systemd; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        if systemctl is-enabled --quiet "backendmgr-nginx-${a}.timer" 2>/dev/null; then
+          state="ON"
+        elif systemctl is-active --quiet "backendmgr-nginx-${a}.timer" 2>/dev/null; then
+          state="ON"
+        fi
+      else
+        state="ON"
+      fi
+    fi
+
+    local lastf="/var/lib/backendmgr/nginx_${a}.last"
+    if [[ -f "$lastf" ]]; then
+      last="$(head -n1 "$lastf" 2>/dev/null || echo "(nunca)")"
+      [[ -z "$last" ]] && last="(nunca)"
+    fi
+
+    local label="RLD"
+    [[ "$a" == "restart" ]] && label="RST"
+    if [[ "$state" == "ON" ]]; then
+      if [[ -n "$interval" ]]; then
+        out+="${label}:${interval} (últ:${last}) "
+      else
+        out+="${label}:ON (últ:${last}) "
+      fi
+    else
+      out+="${label}:OFF "
+    fi
+  done
+  echo "${out%% }"
+}
+
 ramrefresh_last_line() {
   local stamp="${RAMREFRESH_LAST_FILE:-/var/lib/backendmgr/ramrefresh.last}"
   local timer_file="/etc/systemd/system/backendmgr-ramrefresh.timer"
@@ -432,44 +477,47 @@ ramrefresh_last_line() {
     interval="$(grep -E '^OnUnitActiveSec=' "$timer_file" 2>/dev/null | head -n1 | cut -d= -f2- || true)"
   fi
 
-  local is_on="OFF"
-  if command -v systemctl >/dev/null 2>&1; then
-    # Consideramos ON si está enabled O activo (algunos sistemas lo arrancan pero no queda enabled)
-    if systemctl list-unit-files 2>/dev/null | grep -q '^backendmgr-ramrefresh\.timer'; then
-      if systemctl is-enabled --quiet backendmgr-ramrefresh.timer 2>/dev/null; then
-        is_on="ON"
-      elif systemctl is-active --quiet backendmgr-ramrefresh.timer 2>/dev/null; then
-        is_on="ON"
-      fi
-    elif [[ -f "$timer_file" ]]; then
-      # Unit file existe pero list-unit-files no lo muestra (raro, pero pasa si no se recargó daemon)
-      if systemctl is-active --quiet backendmgr-ramrefresh.timer 2>/dev/null; then
-        is_on="ON"
-      fi
-    fi
-  else
-    # sin systemctl: si existe el timer file asumimos ON
-    [[ -f "$timer_file" ]] && is_on="ON"
-  fi
-
   local last="(nunca)"
   if [[ -f "$stamp" ]]; then
     last="$(head -n1 "$stamp" 2>/dev/null || echo "(nunca)")"
     [[ -z "$last" ]] && last="(nunca)"
   fi
 
-  if [[ "$is_on" == "ON" ]]; then
-    if [[ -n "$interval" ]]; then
-      echo "🧹 Refresco RAM: ON (cada ${interval}) | último: ${last}"
-    else
-      echo "🧹 Refresco RAM: ON | último: ${last}"
+  # Estado real (y auto-heal si existe el timer file pero quedó disabled)
+  local is_on="OFF"
+  if have_systemd; then
+    # asegurar que systemd vea units recién creados
+    systemctl daemon-reload >/dev/null 2>&1 || true
+
+    if systemctl is-enabled --quiet backendmgr-ramrefresh.timer 2>/dev/null; then
+      is_on="ON"
+    elif systemctl is-active --quiet backendmgr-ramrefresh.timer 2>/dev/null; then
+      is_on="ON"
+    elif [[ -f "$timer_file" ]]; then
+      # si existe el timer file y quedó "apagado" por algún motivo, lo re-enables sin molestar
+      systemctl enable --now backendmgr-ramrefresh.timer >/dev/null 2>&1 || true
+      if systemctl is-enabled --quiet backendmgr-ramrefresh.timer 2>/dev/null || systemctl is-active --quiet backendmgr-ramrefresh.timer 2>/dev/null; then
+        is_on="ON"
+      fi
     fi
   else
-    echo "🧹 Refresco RAM: OFF | último: ${last}"
+    [[ -f "$timer_file" ]] && is_on="ON"
+  fi
+
+  local ngx_sched
+  ngx_sched="$(nginx_sched_banner_info)"
+
+  if [[ "$is_on" == "ON" ]]; then
+    if [[ -n "$interval" ]]; then
+      echo "🧹 Refresco RAM: ON (cada ${interval}) | último: ${last} | ${ngx_sched}"
+    else
+      echo "🧹 Refresco RAM: ON | último: ${last} | ${ngx_sched}"
+    fi
+  else
+    echo "🧹 Refresco RAM: OFF | último: ${last} | ${ngx_sched}"
   fi
   return 0
 }
-
 
 
 # imprime una línea dentro del recuadro con ancho fijo (respetando emojis/ancho real)
@@ -491,6 +539,39 @@ print(out)' "$1" "$2" 2>/dev/null || {
     s="${s:0:$W}"
     printf "%-*s" "$W" "$s"
   }
+}
+
+disp_center_fit() {
+  # centra texto en ancho W (respetando ancho visual emojis)
+  python3 -c 'import sys,wcwidth; s=sys.argv[1]; W=int(sys.argv[2]); 
+w=sum((cw:=wcwidth.wcwidth(ch)) if cw>0 else 0 for ch in s)
+if w>W:
+  out=""; ww=0
+  for ch in s:
+    cw=wcwidth.wcwidth(ch); cw=0 if cw<0 else cw
+    if ww+cw>W: break
+    out+=ch; ww+=cw
+  s=out; w=ww
+pad=W-w
+l=pad//2
+r=pad-l
+print(" "*l + s + " "*r)' "$1" "$2" 2>/dev/null || {
+    local s="$1" W="$2"
+    s="${s:0:$W}"
+    local pad=$((W-${#s})); ((pad<0)) && pad=0
+    local l=$((pad/2)); local r=$((pad-l))
+    printf "%*s%s%*s" "$l" "" "$s" "$r" ""
+  }
+}
+
+box_line_center() {
+  local w="${1:-62}"
+  shift || true
+  local text="$*"
+  local fitted
+  fitted="$(disp_center_fit "$text" "$w")"
+  printf "║ %s ║
+" "$fitted"
 }
 
 box_line() {
@@ -549,7 +630,8 @@ banner() {
   (( W > 90 )) && W=90
 
   echo -e "${CYA}╔$(printf '═%.0s' $(seq 1 $((W+2))))╗${NC}"
-  box_line "$W" "$l1"
+  box_line_center "$W" "$l1"
+  box_line "$W" "────────────────────────────────────────────────────────"
   box_line "$W" "$l2"
   box_line "$W" "$l3"
   box_line "$W" "$l4"
@@ -784,12 +866,6 @@ tmp="${DB}.tmp.$$"
 
 # Nota: log format:
 # time|remote_addr|host|http_backend|upstream_addr|status|body_bytes_sent|...
-tail -c +"$start" "$STATS_LOG" 2>/dev/null | awk -F'|' -v keyf="$KEYFIELD" '
-  BEGIN { OFS="\t" }
-  # cargar DB existente desde stdin? (no: lo cargamos aparte)
-  { }
-' >/dev/null 2>&1 || true
-
 # awk de verdad (dos pasadas: DB + nuevas líneas)
 tail -c +"$start" "$STATS_LOG" 2>/dev/null | awk -F'|' -v keyf="$KEYFIELD" -v DBFILE="$DB" '
   BEGIN { OFS="\t" }
@@ -828,6 +904,37 @@ EOF
 exit 0
 BASH
   chmod 755 "$helper" || true
+}
+
+# ------------------ TRÁFICO: limpiar historial/resumen (scanner) ------------------
+traffic_scan_clear_history() {
+  echo -e "${CYA}🧹 Borrar historial acumulado del scanner${NC}"
+  echo -e "${DIM}Esto borra los totales guardados y el estado incremental. No toca nginx.conf ni backends.${NC}"
+  echo
+  echo "Se eliminarán (si existen):"
+  echo "  - /var/lib/backendmgr/traffic_totals_ip.db"
+  echo "  - /var/lib/backendmgr/traffic_totals_backend.db"
+  echo "  - /var/lib/backendmgr/traffic_scan.state"
+  echo "  - /var/lib/backendmgr/traffic_last_run"
+  echo
+  read -r -p "Confirmar (s/N): " yn
+  case "${yn,,}" in
+    s|si|sí|y|yes) ;;
+    *) echo -e "${YLW}Cancelado.${NC}"; return 0 ;;
+  esac
+
+  rm -f /var/lib/backendmgr/traffic_totals_ip.db \
+        /var/lib/backendmgr/traffic_totals_backend.db \
+        /var/lib/backendmgr/traffic_scan.state \
+        /var/lib/backendmgr/traffic_last_run 2>/dev/null || true
+
+  # recrear archivos vacíos para evitar mensajes raros
+  mkdir -p /var/lib/backendmgr 2>/dev/null || true
+  : > /var/lib/backendmgr/traffic_totals_ip.db 2>/dev/null || true
+  : > /var/lib/backendmgr/traffic_totals_backend.db 2>/dev/null || true
+
+  echo -e "${GRN}✅ Historial del scanner borrado.${NC}"
+  return 0
 }
 
 traffic_scan_write_units() {
@@ -938,9 +1045,9 @@ traffic_scan_run_now() {
   local state_dir="${STATE_DIR:-/var/lib/backendmgr}"
   mkdir -p "$state_dir" 2>/dev/null || true
 
-  local db_backend="/var/lib/backendmgr/traffic_totals_backend.db"
-  local db_ip="/var/lib/backendmgr/traffic_totals_ip.db"
-  local last_run="/var/lib/backendmgr/traffic_last_run"
+  local db_backend="${TRAFFIC_DB_BACKEND:-${state_dir}/traffic_backend.db}"
+  local db_ip="${TRAFFIC_DB_IP:-${state_dir}/traffic_ip.db}"
+  local last_run="${TRAFFIC_DB_LAST_RUN:-${state_dir}/traffic_last_run.txt}"
 
   local db="$db_backend"
   [[ "$mode" == "ip" ]] && db="$db_ip"
@@ -996,7 +1103,7 @@ traffic_scan_enable() {
   fi
 
   # limpiar estado si se cambia modo (para que arranque prolijo)
-  rm -f /var/lib/backendmgr/traffic_totals_ip.db /var/lib/backendmgr/traffic_totals_backend.db /var/lib/backendmgr/traffic_scan.state 2>/dev/null || true
+  rm -f /var/lib/backendmgr/traffic.scan.*.db 2>/dev/null || true
 
   # guardar config
   jq --arg mode "$mode" --arg interval "$interval" '
@@ -1058,11 +1165,7 @@ traffic_show_from_db() {
     db="/var/lib/backendmgr/traffic_totals_ip.db"
   fi
 
-  [[ -f "$db" ]] || { echo -e "${YLW}No hay resumen todavía. Esperá 1 ciclo del scanner o usá: Totales acumulados (recalcular).${NC}"; return 0; }
-  if ! grep -q "[^[:space:]]" "$db" 2>/dev/null; then
-    echo -e "${YLW}El resumen existe pero está vacío (aún sin tráfico).${NC}"
-    return 0
-  fi
+  [[ -f "$db" ]] || { echo -e "${YLW}No hay resumen todavía (db vacío). Esperá 1 ciclo del scanner.${NC}"; return 0; }
 
   # Mapa backend -> ip:port (desde backends.map)
   local map_tmp=""
@@ -1123,36 +1226,6 @@ traffic_show_from_db() {
   return 0
 }
 
-
-
-traffic_totals_reset_menu() {
-  read_cfg
-  echo -e "${CYA}Borrar totales acumulados del scanner${NC}"
-  echo -e "${DIM}Esto borra SOLO el resumen acumulado (DB + estado).${NC}"
-  echo -e "${DIM}No borra el log: ${STATS_LOG}${NC}"
-  echo
-  echo "Archivos:"
-  echo "  /var/lib/backendmgr/traffic_totals_backend.db"
-  echo "  /var/lib/backendmgr/traffic_totals_ip.db"
-  echo "  /var/lib/backendmgr/traffic_scan.state"
-  echo "  /var/lib/backendmgr/traffic_last_run"
-  echo
-  read -r -p "¿Confirmás borrar el acumulado? (s/N): " yn
-  case "${yn:-}" in
-    s|S|si|SI|Si)
-      rm -f /var/lib/backendmgr/traffic_totals_backend.db \
-            /var/lib/backendmgr/traffic_totals_ip.db \
-            /var/lib/backendmgr/traffic_scan.state \
-            /var/lib/backendmgr/traffic_last_run 2>/dev/null || true
-      echo -e "${GRN}✅ Acumulado borrado.${NC}"
-      echo -e "${DIM}Tip: usá Opción 11 → 6 para recalcular desde TODO el log.${NC}"
-      ;;
-    *)
-      echo -e "${YLW}Cancelado.${NC}"
-      ;;
-  esac
-  return 0
-}
 
 traffic_scan_menu() {
   read_cfg
@@ -1899,7 +1972,7 @@ traffic_stats() {
   echo "4) Desactivar logging de tráfico (stats)"
   echo "5) ⚙️  Escaneo permanente (scanner): menú"
   echo "6) 📌 Totales acumulados (recalcular y mostrar)"
-  echo "7) 🗑️  Borrar totales acumulados (DB/estado)"
+  echo "7) 🧹 Borrar historial del scanner (acumulado)"
   echo "0) Volver"
   read -r -p "Opción: " op
   echo
@@ -1943,7 +2016,7 @@ traffic_stats() {
       ;;
 
     7)
-      traffic_totals_reset_menu
+      traffic_scan_clear_history
       return 0
       ;;
 
@@ -1997,6 +2070,24 @@ traffic_stats() {
       ;;
     *) echo "Opción inválida"; return 0 ;;
   esac
+}
+
+# ------------------ BACKUP / RESTORE: SUBMENÚ ------------------
+backup_restore_menu() {
+  echo -e "${CYA}💾 Backup y restauración${NC}"
+  echo -e "${DIM}Backup: guarda configs en /etc/nginx/backendmgr-backups. Restaurar: aplica un bundle y recarga Nginx.${NC}\n"
+  echo "1) Crear backup (bundle)"
+  echo "2) Restaurar backup (bundle)"
+  echo "0) Volver"
+  read -r -p "Opción: " op
+  echo
+  case "$op" in
+    1) backup_bundle ;;
+    2) restore_bundle ;;
+    0) return 0 ;;
+    *) echo -e "${YLW}Opción inválida.${NC}" ;;
+  esac
+  return 0
 }
 
 # ------------------ FIREWALL UFW ------------------
@@ -2077,6 +2168,27 @@ restore_bundle() {
   return 0
 }
 
+backup_restore_menu() {
+  while true; do
+    echo -e "${CYA}💾 Backup y restauración${NC}"
+    echo -e "${DIM}Backups en: ${BACKUP_DIR}${NC}
+"
+    echo "1) Crear backup (bundle)"
+    echo "2) Restaurar backup (elegir de lista)"
+    echo "3) Listar backups"
+    echo "0) Volver"
+    read -r -p "Opción: " op
+    echo
+    case "$op" in
+      1) backup_bundle; pause ;;
+      2) restore_bundle; pause ;;
+      3) ls -1t "${BACKUP_DIR}"/bundle-*.tar.gz 2>/dev/null | nl -w2 -s') ' || echo "No hay backups."; pause ;;
+      0) return 0 ;;
+      *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
+    esac
+  done
+}
+
 # ------------------ Servicios Nginx ------------------
 nginx_services_menu() {
   echo -e "${CYA}Servicios Nginx${NC}"
@@ -2125,7 +2237,7 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -lc 'mkdir -p /var/lib/backendmgr; sync; echo 3 > /proc/sys/vm/drop_caches; date "+%Y-%m-%d %H:%M:%S" > /var/lib/backendmgr/ramrefresh.last'
+ExecStart=/bin/bash -lc 'sync; echo 3 > /proc/sys/vm/drop_caches; date "+%Y-%m-%d %H:%M:%S" > /var/lib/backendmgr/ramrefresh.last'
 "
 
   # Timer
@@ -2231,7 +2343,7 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -lc 'nginx -t && systemctl ${action} nginx'
+ExecStart=/bin/bash -lc 'mkdir -p /var/lib/backendmgr; if nginx -t; then systemctl ${action} nginx; date "+%Y-%m-%d %H:%M:%S" > /var/lib/backendmgr/nginx_${action}.last; fi'
 "
 
   systemd_write_unit "/etc/systemd/system/${tmr}" \
@@ -2533,8 +2645,7 @@ menu() {
   echo " 10) 🚦 Limitar ancho de banda por IP o Backend (limit_rate)"
   echo " 11) 📊 Tráfico por IP / Backend (stats log + scanner)"
   echo " 12) 🔥 Firewall UFW: abrir puerto (80/443/otro)"
-  echo " 13) 💾 Backup"
-  echo " 14) ♻️  Restaurar backup"
+  echo " 13) 💾 Backup y restauración"
   echo " 15) ⚙️  Servicios de Nginx (Status/Stop/Start/Reload/Restart)"
   echo " 16) 🚀 Speedtest (Ping / Bajada / Subida)"
   echo " 17) 🧰 Mantenimiento programado (RAM / Nginx timers)"
@@ -2560,7 +2671,7 @@ main() {
     traffic_scan_write_helper >/dev/null 2>&1 || true
     # si el timer no existe, lo recreamos
     if ! systemctl list-unit-files 2>/dev/null | grep -q '^backendmgr-traffic-scan\.timer'; then
-      traffic_scan_write_units "${TRAFFIC_SCAN_INTERVAL}" >/dev/null 2>&1 || true
+      traffic_scan_write_units "${TRAFFIC_SCAN_MODE}" "${TRAFFIC_SCAN_INTERVAL}" >/dev/null 2>&1 || true
       systemd_reload_daemon
       systemctl enable --now backendmgr-traffic-scan.timer >/dev/null 2>&1 || true
     fi
@@ -2585,8 +2696,8 @@ main() {
      10) speed_limit_menu; pause ;;
      11) traffic_stats; pause ;;
      12) ufw_open_port; pause ;;
-     13) backup_bundle; pause ;;
-     14) restore_bundle; pause ;;
+     13) backup_restore_menu; pause ;;
+     14) backup_restore_menu; pause ;;  # alias legacy (no se muestra en menú)
      15) nginx_services_menu; pause ;;
      16) speedtest_menu; pause ;;
      17) maintenance_menu; pause ;;
