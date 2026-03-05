@@ -42,8 +42,8 @@ PANEL_LOG="/var/log/backendmgr.panel.log"
 
 # ---- Guardas anti "unbound variable" (set -u) ----
 : "${STATE_DIR:=/var/lib/backendmgr}"
-: "${TRAFFIC_DB_BACKEND:=${STATE_DIR}/traffic_backend.db}"
-: "${TRAFFIC_DB_IP:=${STATE_DIR}/traffic_ip.db}"
+: "${TRAFFIC_DB_BACKEND:=${STATE_DIR}/traffic_totals_backend.db}"
+: "${TRAFFIC_DB_IP:=${STATE_DIR}/traffic_totals_ip.db}"
 : "${TRAFFIC_DB_LAST_RUN:=${STATE_DIR}/traffic_last_run}"
 
 # ------------------ STATE (traffic scanner DB) ------------------
@@ -434,8 +434,16 @@ ramrefresh_last_line() {
 
   local is_on="OFF"
   if command -v systemctl >/dev/null 2>&1; then
+    # Consideramos ON si está enabled O activo (algunos sistemas lo arrancan pero no queda enabled)
     if systemctl list-unit-files 2>/dev/null | grep -q '^backendmgr-ramrefresh\.timer'; then
       if systemctl is-enabled --quiet backendmgr-ramrefresh.timer 2>/dev/null; then
+        is_on="ON"
+      elif systemctl is-active --quiet backendmgr-ramrefresh.timer 2>/dev/null; then
+        is_on="ON"
+      fi
+    elif [[ -f "$timer_file" ]]; then
+      # Unit file existe pero list-unit-files no lo muestra (raro, pero pasa si no se recargó daemon)
+      if systemctl is-active --quiet backendmgr-ramrefresh.timer 2>/dev/null; then
         is_on="ON"
       fi
     fi
@@ -460,6 +468,8 @@ ramrefresh_last_line() {
     echo "🧹 Refresco RAM: OFF | último: ${last}"
   fi
   return 0
+}
+
 }
 
 
@@ -775,6 +785,12 @@ tmp="${DB}.tmp.$$"
 
 # Nota: log format:
 # time|remote_addr|host|http_backend|upstream_addr|status|body_bytes_sent|...
+tail -c +"$start" "$STATS_LOG" 2>/dev/null | awk -F'|' -v keyf="$KEYFIELD" '
+  BEGIN { OFS="\t" }
+  # cargar DB existente desde stdin? (no: lo cargamos aparte)
+  { }
+' >/dev/null 2>&1 || true
+
 # awk de verdad (dos pasadas: DB + nuevas líneas)
 tail -c +"$start" "$STATS_LOG" 2>/dev/null | awk -F'|' -v keyf="$KEYFIELD" -v DBFILE="$DB" '
   BEGIN { OFS="\t" }
@@ -813,37 +829,6 @@ EOF
 exit 0
 BASH
   chmod 755 "$helper" || true
-}
-
-# ------------------ TRÁFICO: limpiar historial/resumen (scanner) ------------------
-traffic_scan_clear_history() {
-  echo -e "${CYA}🧹 Borrar historial acumulado del scanner${NC}"
-  echo -e "${DIM}Esto borra los totales guardados y el estado incremental. No toca nginx.conf ni backends.${NC}"
-  echo
-  echo "Se eliminarán (si existen):"
-  echo "  - /var/lib/backendmgr/traffic_totals_ip.db"
-  echo "  - /var/lib/backendmgr/traffic_totals_backend.db"
-  echo "  - /var/lib/backendmgr/traffic_scan.state"
-  echo "  - /var/lib/backendmgr/traffic_last_run"
-  echo
-  read -r -p "Confirmar (s/N): " yn
-  case "${yn,,}" in
-    s|si|sí|y|yes) ;;
-    *) echo -e "${YLW}Cancelado.${NC}"; return 0 ;;
-  esac
-
-  rm -f /var/lib/backendmgr/traffic_totals_ip.db \
-        /var/lib/backendmgr/traffic_totals_backend.db \
-        /var/lib/backendmgr/traffic_scan.state \
-        /var/lib/backendmgr/traffic_last_run 2>/dev/null || true
-
-  # recrear archivos vacíos para evitar mensajes raros
-  mkdir -p /var/lib/backendmgr 2>/dev/null || true
-  : > /var/lib/backendmgr/traffic_totals_ip.db 2>/dev/null || true
-  : > /var/lib/backendmgr/traffic_totals_backend.db 2>/dev/null || true
-
-  echo -e "${GRN}✅ Historial del scanner borrado.${NC}"
-  return 0
 }
 
 traffic_scan_write_units() {
@@ -954,9 +939,9 @@ traffic_scan_run_now() {
   local state_dir="${STATE_DIR:-/var/lib/backendmgr}"
   mkdir -p "$state_dir" 2>/dev/null || true
 
-  local db_backend="${TRAFFIC_DB_BACKEND:-${state_dir}/traffic_backend.db}"
-  local db_ip="${TRAFFIC_DB_IP:-${state_dir}/traffic_ip.db}"
-  local last_run="${TRAFFIC_DB_LAST_RUN:-${state_dir}/traffic_last_run.txt}"
+  local db_backend="/var/lib/backendmgr/traffic_totals_backend.db"
+  local db_ip="/var/lib/backendmgr/traffic_totals_ip.db"
+  local last_run="/var/lib/backendmgr/traffic_last_run"
 
   local db="$db_backend"
   [[ "$mode" == "ip" ]] && db="$db_ip"
@@ -1012,7 +997,7 @@ traffic_scan_enable() {
   fi
 
   # limpiar estado si se cambia modo (para que arranque prolijo)
-  rm -f /var/lib/backendmgr/traffic.scan.*.db 2>/dev/null || true
+  rm -f /var/lib/backendmgr/traffic_totals_ip.db /var/lib/backendmgr/traffic_totals_backend.db /var/lib/backendmgr/traffic_scan.state 2>/dev/null || true
 
   # guardar config
   jq --arg mode "$mode" --arg interval "$interval" '
@@ -1074,7 +1059,11 @@ traffic_show_from_db() {
     db="/var/lib/backendmgr/traffic_totals_ip.db"
   fi
 
-  [[ -f "$db" ]] || { echo -e "${YLW}No hay resumen todavía (db vacío). Esperá 1 ciclo del scanner.${NC}"; return 0; }
+  [[ -f "$db" ]] || { echo -e "${YLW}No hay resumen todavía. Esperá 1 ciclo del scanner o usá: Totales acumulados (recalcular).${NC}"; return 0; }
+  if ! grep -q "[^[:space:]]" "$db" 2>/dev/null; then
+    echo -e "${YLW}El resumen existe pero está vacío (aún sin tráfico).${NC}"
+    return 0
+  fi
 
   # Mapa backend -> ip:port (desde backends.map)
   local map_tmp=""
@@ -1881,7 +1870,6 @@ traffic_stats() {
   echo "4) Desactivar logging de tráfico (stats)"
   echo "5) ⚙️  Escaneo permanente (scanner): menú"
   echo "6) 📌 Totales acumulados (recalcular y mostrar)"
-  echo "7) 🧹 Borrar historial del scanner (acumulado)"
   echo "0) Volver"
   read -r -p "Opción: " op
   echo
@@ -1921,11 +1909,6 @@ traffic_stats() {
         2) traffic_scan_run_now "backend"; echo; traffic_show_from_db "backend" ;;
         *) echo -e "${YLW}Opción inválida.${NC}" ;;
       esac
-      return 0
-      ;;
-
-    7)
-      traffic_scan_clear_history
       return 0
       ;;
 
@@ -1979,24 +1962,6 @@ traffic_stats() {
       ;;
     *) echo "Opción inválida"; return 0 ;;
   esac
-}
-
-# ------------------ BACKUP / RESTORE: SUBMENÚ ------------------
-backup_restore_menu() {
-  echo -e "${CYA}💾 Backup y restauración${NC}"
-  echo -e "${DIM}Backup: guarda configs en /etc/nginx/backendmgr-backups. Restaurar: aplica un bundle y recarga Nginx.${NC}\n"
-  echo "1) Crear backup (bundle)"
-  echo "2) Restaurar backup (bundle)"
-  echo "0) Volver"
-  read -r -p "Opción: " op
-  echo
-  case "$op" in
-    1) backup_bundle ;;
-    2) restore_bundle ;;
-    0) return 0 ;;
-    *) echo -e "${YLW}Opción inválida.${NC}" ;;
-  esac
-  return 0
 }
 
 # ------------------ FIREWALL UFW ------------------
@@ -2125,7 +2090,7 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -lc 'sync; echo 3 > /proc/sys/vm/drop_caches; date "+%Y-%m-%d %H:%M:%S" > /var/lib/backendmgr/ramrefresh.last'
+ExecStart=/bin/bash -lc 'mkdir -p /var/lib/backendmgr; sync; echo 3 > /proc/sys/vm/drop_caches; date "+%Y-%m-%d %H:%M:%S" > /var/lib/backendmgr/ramrefresh.last'
 "
 
   # Timer
@@ -2533,7 +2498,8 @@ menu() {
   echo " 10) 🚦 Limitar ancho de banda por IP o Backend (limit_rate)"
   echo " 11) 📊 Tráfico por IP / Backend (stats log + scanner)"
   echo " 12) 🔥 Firewall UFW: abrir puerto (80/443/otro)"
-  echo " 13) 💾 Backup y restauración"
+  echo " 13) 💾 Backup"
+  echo " 14) ♻️  Restaurar backup"
   echo " 15) ⚙️  Servicios de Nginx (Status/Stop/Start/Reload/Restart)"
   echo " 16) 🚀 Speedtest (Ping / Bajada / Subida)"
   echo " 17) 🧰 Mantenimiento programado (RAM / Nginx timers)"
@@ -2559,7 +2525,7 @@ main() {
     traffic_scan_write_helper >/dev/null 2>&1 || true
     # si el timer no existe, lo recreamos
     if ! systemctl list-unit-files 2>/dev/null | grep -q '^backendmgr-traffic-scan\.timer'; then
-      traffic_scan_write_units "${TRAFFIC_SCAN_MODE}" "${TRAFFIC_SCAN_INTERVAL}" >/dev/null 2>&1 || true
+      traffic_scan_write_units "${TRAFFIC_SCAN_INTERVAL}" >/dev/null 2>&1 || true
       systemd_reload_daemon
       systemctl enable --now backendmgr-traffic-scan.timer >/dev/null 2>&1 || true
     fi
@@ -2584,8 +2550,8 @@ main() {
      10) speed_limit_menu; pause ;;
      11) traffic_stats; pause ;;
      12) ufw_open_port; pause ;;
-     13) backup_restore_menu; pause ;;
-     14) backup_restore_menu; pause ;;  # alias legacy (no se muestra en menú)
+     13) backup_bundle; pause ;;
+     14) restore_bundle; pause ;;
      15) nginx_services_menu; pause ;;
      16) speedtest_menu; pause ;;
      17) maintenance_menu; pause ;;
