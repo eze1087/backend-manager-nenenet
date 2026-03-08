@@ -286,13 +286,16 @@ install_wrapper_nginx(){
 #!/usr/bin/env bash
 set -euo pipefail
 
+# === BACKENDMGR WRAPPER (SAFE) ===
+# - Sin args: abre el panel
+# - Con args: ejecuta nginx real (sin recursión)
 PANEL="/usr/local/bin/backendmgr"
-REAL="/usr/sbin/nginx.real"
 LOG="/var/log/backendmgr.wrapper.log"
 
 log() {
   mkdir -p /var/log 2>/dev/null || true
-  printf "[%s] %s\n" "$(date +%F\ %T)" "$*" >>"$LOG" 2>/dev/null || true
+  printf "[%s] %s
+" "$(date +%F\ %T)" "$*" >>"$LOG" 2>/dev/null || true
 }
 
 run_panel() {
@@ -300,8 +303,12 @@ run_panel() {
   log "RUN_PANEL user=$(id -u) tty=$(tty 2>/dev/null || echo none) cwd=$(pwd)"
 
   if [[ ! -x "$PANEL" ]]; then
-    echo "ERROR: no existe o no es ejecutable: $PANEL" >/dev/tty 2>/dev/null || true
-    log "ERROR panel no executable"
+    log "ERROR panel not executable: $PANEL"
+    if [[ -r /dev/tty && -w /dev/tty ]]; then
+      echo "ERROR: no existe o no es ejecutable: $PANEL" >/dev/tty
+    else
+      echo "ERROR: no existe o no es ejecutable: $PANEL" >&2
+    fi
     return 127
   fi
 
@@ -317,6 +324,7 @@ run_panel() {
 
   log "PANEL_EXIT rc=$rc"
 
+  # Solo avisar si hubo error (rc != 0)
   if [[ "$rc" -ne 0 && -r /dev/tty && -w /dev/tty ]]; then
     echo "" >/dev/tty
     echo "⚠️ El panel terminó (rc=$rc). Log: $LOG" >/dev/tty
@@ -326,11 +334,13 @@ run_panel() {
   return "$rc"
 }
 
+# Sin args -> panel
 if [[ $# -eq 0 ]]; then
   run_panel
   exit $?
 fi
 
+# Alias explícitos
 case "${1:-}" in
   menu|panel|nenenet)
     run_panel
@@ -338,10 +348,18 @@ case "${1:-}" in
   ;;
 esac
 
-if [[ ! -x "$REAL" ]]; then
-  REAL="/usr/sbin/nginx"
-fi
-exec "$REAL" "$@"
+# Con args -> nginx real (evitar loop si /usr/bin/nginx o /usr/local/bin/nginx son symlinks al wrapper)
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+for CAND in /usr/sbin/nginx.real /usr/bin/nginx /bin/nginx; do
+  [[ -x "$CAND" ]] || continue
+  REALPATH="$(readlink -f "$CAND" 2>/dev/null || echo "$CAND")"
+  [[ "$REALPATH" == "$SELF" ]] && continue
+  exec "$REALPATH" "$@"
+done
+
+log "ERROR real nginx missing (args=$*)"
+echo "ERROR: nginx real no encontrado (esperado /usr/sbin/nginx.real)." >&2
+exit 127
 WRAP
 
   chmod +x "$SBIN"
@@ -371,17 +389,11 @@ main(){
   echo "[5/8] nginx.conf include..."
   ensure_nginx_conf_include
 
-  install_wrapper_nginx
-
   echo "[7/8] Reload..."
-  if [[ -x /usr/sbin/nginx.real ]]; then
-    /usr/sbin/nginx.real -t
-    /usr/sbin/nginx.real -s reload >/dev/null 2>&1 || true
-  else
-    nginx -t
-    nginx -s reload >/dev/null 2>&1 || true
-  fi
+  nginx -t
+  nginx -s reload >/dev/null 2>&1 || true
 
+  install_wrapper_nginx
 
   echo "[8/8] ✅ Listo. Abrir panel con: nginx  (o sudo nginx)"
 }
