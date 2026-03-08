@@ -72,6 +72,7 @@ BBLU='[1;34m'
 BCYA='[1;36m'
 BG_RED='[41m'
 BG_BLUE='[44m'
+BG_PANEL='[48;5;24m'   # fondo header panel (azul personalizado)
 BG_DARK='[48;5;236m'
 BG_NONE='[49m'
 
