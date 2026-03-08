@@ -473,22 +473,19 @@ server_ip_short() {
 }
 
 nginx_sched_banner_info() {
-  # Devuelve info breve de nginx reload/restart programado y último run
+  # Devuelve info breve de nginx reload/restart programado (sin "último")
   local out=""
   local actions=("reload" "restart")
   local a
   for a in "${actions[@]}"; do
     local tmr="/etc/systemd/system/backendmgr-nginx-${a}.timer"
-    local interval="" last="(nunca)" state="OFF"
+    local interval="" state="OFF"
 
     if [[ -f "$tmr" ]]; then
       interval="$(grep -E '^OnUnitActiveSec=' "$tmr" 2>/dev/null | head -n1 | cut -d= -f2- || true)"
-      # auto-heal: si existe unit file pero systemd no lo ve aún, recarga daemon
       if have_systemd; then
         systemctl daemon-reload >/dev/null 2>&1 || true
-        if systemctl is-enabled --quiet "backendmgr-nginx-${a}.timer" 2>/dev/null; then
-          state="ON"
-        elif systemctl is-active --quiet "backendmgr-nginx-${a}.timer" 2>/dev/null; then
+        if systemctl is-enabled --quiet "backendmgr-nginx-${a}.timer" 2>/dev/null || systemctl is-active --quiet "backendmgr-nginx-${a}.timer" 2>/dev/null; then
           state="ON"
         fi
       else
@@ -496,19 +493,14 @@ nginx_sched_banner_info() {
       fi
     fi
 
-    local lastf="/var/lib/backendmgr/nginx_${a}.last"
-    if [[ -f "$lastf" ]]; then
-      last="$(head -n1 "$lastf" 2>/dev/null || echo "(nunca)")"
-      [[ -z "$last" ]] && last="(nunca)"
-    fi
-
     local label="RLD"
     [[ "$a" == "restart" ]] && label="RST"
+
     if [[ "$state" == "ON" ]]; then
       if [[ -n "$interval" ]]; then
-        out+="${label}:${interval} (últ:${last}) "
+        out+="${label}:${interval} "
       else
-        out+="${label}:ON (últ:${last}) "
+        out+="${label}:ON "
       fi
     else
       out+="${label}:OFF "
@@ -517,33 +509,21 @@ nginx_sched_banner_info() {
   echo "${out%% }"
 }
 
-ramrefresh_last_line() {
-  local stamp="${RAMREFRESH_LAST_FILE:-/var/lib/backendmgr/ramrefresh.last}"
-  local timer_file="/etc/systemd/system/backendmgr-ramrefresh.timer"
 
+ramrefresh_last_line() {
+  local timer_file="/etc/systemd/system/backendmgr-ramrefresh.timer"
   local interval=""
   if [[ -f "$timer_file" ]]; then
     interval="$(grep -E '^OnUnitActiveSec=' "$timer_file" 2>/dev/null | head -n1 | cut -d= -f2- || true)"
   fi
 
-  local last="(nunca)"
-  if [[ -f "$stamp" ]]; then
-    last="$(head -n1 "$stamp" 2>/dev/null || echo "(nunca)")"
-    [[ -z "$last" ]] && last="(nunca)"
-  fi
-
   # Estado real (y auto-heal si existe el timer file pero quedó disabled)
   local is_on="OFF"
   if have_systemd; then
-    # asegurar que systemd vea units recién creados
     systemctl daemon-reload >/dev/null 2>&1 || true
-
-    if systemctl is-enabled --quiet backendmgr-ramrefresh.timer 2>/dev/null; then
-      is_on="ON"
-    elif systemctl is-active --quiet backendmgr-ramrefresh.timer 2>/dev/null; then
+    if systemctl is-enabled --quiet backendmgr-ramrefresh.timer 2>/dev/null || systemctl is-active --quiet backendmgr-ramrefresh.timer 2>/dev/null; then
       is_on="ON"
     elif [[ -f "$timer_file" ]]; then
-      # si existe el timer file y quedó "apagado" por algún motivo, lo re-enables sin molestar
       systemctl enable --now backendmgr-ramrefresh.timer >/dev/null 2>&1 || true
       if systemctl is-enabled --quiet backendmgr-ramrefresh.timer 2>/dev/null || systemctl is-active --quiet backendmgr-ramrefresh.timer 2>/dev/null; then
         is_on="ON"
@@ -558,15 +538,16 @@ ramrefresh_last_line() {
 
   if [[ "$is_on" == "ON" ]]; then
     if [[ -n "$interval" ]]; then
-      echo "🧹 Refresco RAM: ON (cada ${interval}) | último: ${last} | ${ngx_sched}"
+      echo "🧹 Refresco RAM: ON (cada ${interval}) | ${ngx_sched}"
     else
-      echo "🧹 Refresco RAM: ON | último: ${last} | ${ngx_sched}"
+      echo "🧹 Refresco RAM: ON | ${ngx_sched}"
     fi
   else
-    echo "🧹 Refresco RAM: OFF | último: ${last} | ${ngx_sched}"
+    echo "🧹 Refresco RAM: OFF | ${ngx_sched}"
   fi
   return 0
 }
+
 
 
 # imprime una línea dentro del recuadro con ancho fijo (respetando emojis/ancho real)
@@ -3002,43 +2983,82 @@ restore_nginx_binary(){
 }
 
 
-ensure_nginx_wrapper_quiet_on_success(){
-  # Algunos servers tienen wrapper en /usr/sbin/nginx y otros en /usr/local/bin/nginx
-  local candidates=(/usr/sbin/nginx /usr/local/bin/nginx /usr/bin/nginx)
-  local SBIN
+    ensure_nginx_wrapper_quiet_on_success(){
+      # Repara el wrapper nginx (si existe) para:
+      # - evitar "rc: unbound variable" con set -u
+      # - NO mostrar "⚠️ El panel terminó..." si rc=0
+      # - evitar errores tipo "conditional binary operator expected"
+      local candidates=(/usr/sbin/nginx /usr/local/bin/nginx /usr/bin/nginx)
+      local SBIN
 
-  for SBIN in "${candidates[@]}"; do
-    [[ -f "$SBIN" ]] || continue
+      for SBIN in "${candidates[@]}"; do
+        [[ -f "$SBIN" ]] || continue
+        grep -q "backendmgr.wrapper.log" "$SBIN" 2>/dev/null || continue
 
-    # Solo aplica si es nuestro wrapper (usa backendmgr.wrapper.log)
-    grep -q "backendmgr.wrapper.log" "$SBIN" 2>/dev/null || continue
+        # Si ya tiene el run_panel seguro, no tocamos
+        grep -q "BEGIN BACKENDMGR SAFE RUN_PANEL" "$SBIN" 2>/dev/null && continue
 
-    # Si ya está parchado (usa rc default-safe), salir
-    grep -q 'rc="\${rc:-0}"' "$SBIN" 2>/dev/null && continue
+        local tmp
+        tmp="$(mktemp)"
 
-    # Parche robusto para set -u: rc puede no existir → rc="${rc:-0}"
-    # Y mostrar el mensaje/Enter SOLO si rc != 0
-    local tmp
-    tmp="$(mktemp)"
-    perl -0777 -pe '
-      s/if\s+\[\[\s+-r\s+\/dev\/tty\s+&&\s+-w\s+\/dev\/tty\s+\]\]\s*;\s*then\s*
-        (.*?)
-      \s*fi
-      /if [[ -r \/dev\/tty && -w \/dev\/tty ]]; then\n  rc="\\${rc:-0}"\n  # Solo avisar si hubo error\n  if [[ "\\$rc" -ne 0 ]]; then\n$1\n    read -r -p "Enter para volver..." _ <\/dev\/tty || true\n  fi\nfi/sx
-    ' "$SBIN" > "$tmp" 2>/dev/null || { rm -f "$tmp"; continue; }
+        perl -0777 -pe '
+          my $safe = qq(
+# BEGIN BACKENDMGR SAFE RUN_PANEL
+run_panel() {
+  local PANEL="/usr/local/bin/backendmgr"
+  local LOG="/var/log/backendmgr.wrapper.log"
+  mkdir -p /var/log >/dev/null 2>&1 || true
 
-    # Si el parche no cambió nada (no matcheó), no tocamos
-    if cmp -s "$SBIN" "$tmp"; then
-      rm -f "$tmp"
-      continue
+  if [[ ! -x "$PANEL" ]]; then
+    echo "ERROR: panel no encontrado: $PANEL" >&2
+    return 127
+  fi
+
+  local rc=0
+  set +e
+  if [[ -r /dev/tty && -w /dev/tty ]]; then
+    </dev/tty >/dev/tty 2>&1 "$PANEL"
+    rc=$?
+  else
+    "$PANEL"
+    rc=$?
+  fi
+  set -e
+
+  echo "PANEL_EXIT rc=$rc" >>"$LOG" 2>/dev/null || true
+
+  # Solo avisar si hubo error (rc != 0)
+  if [[ -r /dev/tty && -w /dev/tty ]]; then
+    if [[ ! "$rc" =~ ^[0-9]+$ ]]; then rc=0; fi
+    if [[ "$rc" -ne 0 ]]; then
+      echo "" >/dev/tty
+      echo "⚠️ El panel terminó (rc=$rc). Log: $LOG" >/dev/tty
+      read -r -p "Enter para volver..." _ </dev/tty || true
     fi
+  fi
 
-    cp -a "$SBIN" "${SBIN}.bak.$(date +%F_%H%M%S)" 2>/dev/null || true
-    cat "$tmp" > "$SBIN"
-    chmod 755 "$SBIN" 2>/dev/null || true
-    rm -f "$tmp"
-  done
+  return "$rc"
 }
+# END BACKENDMGR SAFE RUN_PANEL
+);
+
+          # Reemplaza cualquier definición existente de run_panel() { ... }
+          s/run_panel\(\)\s*\{.*?\n\}/$safe/s;
+
+        ' "$SBIN" > "$tmp" 2>/dev/null || { rm -f "$tmp"; continue; }
+
+        if cmp -s "$SBIN" "$tmp"; then
+          rm -f "$tmp"
+          continue
+        fi
+
+        cp -a "$SBIN" "${SBIN}.bak.$(date +%F_%H%M%S)" 2>/dev/null || true
+        cat "$tmp" > "$SBIN"
+        chmod 755 "$SBIN" 2>/dev/null || true
+        rm -f "$tmp"
+      done
+    }
+
 
 
 uninstall_backendmgr(){
