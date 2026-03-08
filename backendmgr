@@ -3159,8 +3159,10 @@ uninstall_backendmgr(){
 
 # ------------------ MENU ------------------
 menu() {
+  echo -e "${BLU}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
   echo -e "${WHT}📌 MENÚ PRINCIPAL${NC}"
   echo -e "${DIM}Elegí una opción (número) y Enter.${NC}"
+  echo -e "${BLU}──────────────────────────────────────────────────────────────${NC}"
   echo
   echo -e "${BCYA}[01]${NC} 🌐 Dominios madre (crear / editar / eliminar)"
   echo -e "${BCYA}[02]${NC} ➕ Agregar backend (rápido: nombre + IP + puerto)"
@@ -3179,7 +3181,9 @@ menu() {
   echo -e "${BCYA}[17]${NC} 🧰 Mantenimiento programado (RAM / Nginx timers)"
   echo -e "${BCYA}[18]${NC} 🗑️  Desinstalar Backend Manager"
   echo
+  echo -e "${BLU}──────────────────────────────────────────────────────────────${NC}"
   echo -e "${BCYA}[00]${NC} 🚪 Salir"
+  echo -e "${BLU}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
   echo
 }
 
