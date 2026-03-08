@@ -53,6 +53,7 @@ RAMREFRESH_LAST_FILE="${STATE_DIR}/ramrefresh.last"
 TRAFFIC_DB_IP="${STATE_DIR}/traffic_ip.db"
 TRAFFIC_DB_BACKEND="${STATE_DIR}/traffic_backend.db"
 TRAFFIC_DB_LAST_RUN="${STATE_DIR}/traffic_last_run"
+BACKEND_META_FILE="${STATE_DIR}/backends.meta"
 
 
 # ------------------ COLORES ------------------
@@ -167,6 +168,7 @@ ensure_files() {
   [[ -f "$TRAFFIC_DB_IP" ]] || : > "$TRAFFIC_DB_IP"
   [[ -f "$TRAFFIC_DB_BACKEND" ]] || : > "$TRAFFIC_DB_BACKEND"
   [[ -f "$TRAFFIC_DB_LAST_RUN" ]] || : > "$TRAFFIC_DB_LAST_RUN"
+  [[ -f "$BACKEND_META_FILE" ]] || : > "$BACKEND_META_FILE"
 
   chmod 700 "$BACKUP_DIR" || true
 
@@ -1872,6 +1874,255 @@ domains_menu() {
 }
 
 # ------------------ BACKENDS ------------------
+
+# ------------------ META BACKENDS (creación / expiración) ------------------
+# Formato: key|ip|port|created_epoch|expires_epoch(0=sin vencimiento)
+backend_meta_normalize() {
+  [[ -f "$BACKEND_META_FILE" ]] || return 0
+  awk -F'|' 'NF>=1 && $1!=""{a[$1]=$0} END{for(k in a) print a[k]}' "$BACKEND_META_FILE" \
+    | sort > "${BACKEND_META_FILE}.tmp" 2>/dev/null || true
+  mv -f "${BACKEND_META_FILE}.tmp" "$BACKEND_META_FILE" 2>/dev/null || true
+}
+
+backend_meta_get() {
+  local k="$1"
+  [[ -f "$BACKEND_META_FILE" ]] || return 1
+  grep -E "^${k}\|" "$BACKEND_META_FILE" 2>/dev/null | tail -n 1
+}
+
+backend_meta_upsert() {
+  local k="$1" ip="$2" port="$3" created="$4" expires="$5"
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  [[ -f "$BACKEND_META_FILE" ]] || : > "$BACKEND_META_FILE"
+  # remover vieja
+  grep -v -E "^${k}\|" "$BACKEND_META_FILE" > "${BACKEND_META_FILE}.tmp" 2>/dev/null || true
+  printf "%s|%s|%s|%s|%s\n" "$k" "$ip" "$port" "$created" "$expires" >> "${BACKEND_META_FILE}.tmp"
+  mv -f "${BACKEND_META_FILE}.tmp" "$BACKEND_META_FILE"
+  backend_meta_normalize
+}
+
+backend_meta_remove() {
+  local k="$1"
+  [[ -f "$BACKEND_META_FILE" ]] || return 0
+  grep -v -E "^${k}\|" "$BACKEND_META_FILE" > "${BACKEND_META_FILE}.tmp" 2>/dev/null || true
+  mv -f "${BACKEND_META_FILE}.tmp" "$BACKEND_META_FILE" 2>/dev/null || true
+}
+
+backend_fmt_date() {
+  local epoch="$1"
+  [[ -z "$epoch" || "$epoch" == "0" ]] && { echo "-"; return 0; }
+  date -d "@$epoch" "+%Y-%m-%d" 2>/dev/null || echo "-"
+}
+
+backend_delete_by_key() {
+  local key="$1"
+  # busca línea exacta por key en backends.map y la elimina
+  local line
+  line="$(backend_lines | awk -v k="$key" '{
+      match($0, /^[ \t]*"([^"]+)"/, m);
+      if(m[1]==k){print; exit}
+    }')"
+  [[ -n "$line" ]] || return 1
+
+  awk -v t="$line" '$0!=t{print}' "$NGX_BACKENDS_MAP" > "${NGX_BACKENDS_MAP}.tmp" || true
+  mv "${NGX_BACKENDS_MAP}.tmp" "$NGX_BACKENDS_MAP"
+
+  backend_meta_remove "$key"
+
+  rebuild_balancer_files
+  ensure_http_conf_maps
+  ensure_mothers_include
+  write_apply_conf
+  nginx_test_reload
+  return 0
+}
+
+add_backend_core() {
+  local key="$1" ip="$2" port="$3"
+  local url="http://${ip}:${port}"
+
+  if grep -qE "^\s*\"${key}\"" "$NGX_BACKENDS_MAP"; then
+    awk -v k="$key" -v url="$url" '
+      { re="^[ \t]*\""k"\"";
+        if($0~re){ sub(/\"http:\\/\\/[^\\\"]+\"/, "\""url"\"") }
+        print
+      }' "$NGX_BACKENDS_MAP" > "${NGX_BACKENDS_MAP}.tmp" && mv "${NGX_BACKENDS_MAP}.tmp" "$NGX_BACKENDS_MAP"
+    echo -e "${GRN}✅ Actualizado:${NC} $key -> $ip:$port"
+  else
+    printf "        \"%s\" \"%s\";\n" "$key" "$url" >> "$NGX_BACKENDS_MAP"
+    echo -e "${GRN}✅ Agregado:${NC} $key -> $ip:$port"
+  fi
+
+  rebuild_balancer_files
+  ensure_http_conf_maps
+  ensure_mothers_include
+  write_apply_conf
+  nginx_test_reload
+  return 0
+}
+
+backend_add_with_days() {
+  echo -e "${CYA}Nuevo backend (con vencimiento en días)${NC}"
+  echo -e "${DIM}Ejemplo: elnene51 -> 38.242.152.147:80 (30 días)${NC}\n"
+
+  read -r -p "Nombre del backend (ej: elnene51): " key
+  validate_key "$key" || { echo -e "${RED}Nombre inválido.${NC}"; return 0; }
+
+  read -r -p "IP (ej: 179.43.112.38): " ip
+  validate_ip "$ip" || { echo -e "${RED}IP inválida.${NC}"; return 0; }
+
+  read -r -p "Puerto (ej: 80): " port
+  [[ "$port" =~ ^[0-9]{2,5}$ ]] || { echo -e "${RED}Puerto inválido.${NC}"; return 0; }
+
+  read -r -p "Cantidad de días activo (ej: 30): " days
+  [[ "$days" =~ ^[0-9]+$ ]] || { echo -e "${RED}Días inválidos.${NC}"; return 0; }
+  (( days>=1 && days<=3650 )) || { echo -e "${RED}Días fuera de rango.${NC}"; return 0; }
+
+  add_backend_core "$key" "$ip" "$port" || return 0
+
+  local now exp created_old exp_old line
+  now="$(date +%s)"
+  line="$(backend_meta_get "$key" || true)"
+  if [[ -n "$line" ]]; then
+    created_old="$(echo "$line" | awk -F'|' '{print $4}')"
+    exp_old="$(echo "$line" | awk -F'|' '{print $5}')"
+    [[ -z "$created_old" || "$created_old" == "0" ]] && created_old="$now"
+  else
+    created_old="$now"
+    exp_old="0"
+  fi
+  exp="$((now + days*86400))"
+  backend_meta_upsert "$key" "$ip" "$port" "$created_old" "$exp"
+
+  echo -e "${GRN}📅 Vence:${NC} $(backend_fmt_date "$exp")"
+  return 0
+}
+
+backend_list_with_dates() {
+  echo -e "${CYA}Backends (IP/puerto + fechas)${NC}\n"
+  printf "%-4s %-20s %-18s %-6s %-12s %-12s\n" "#" "BACKEND" "IP" "PORT" "CREADO" "VENCE"
+  echo "----------------------------------------------------------------------------"
+  local i=0 key url ipport ip port line created exp
+  while IFS= read -r line_map; do
+    [[ -z "$line_map" ]] && continue
+    i=$((i+1))
+    key="$(echo "$line_map" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
+    url="$(echo "$line_map" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
+    ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
+
+    line="$(backend_meta_get "$key" || true)"
+    created="$(echo "$line" | awk -F'|' '{print $4}')"
+    exp="$(echo "$line" | awk -F'|' '{print $5}')"
+    [[ -z "$created" ]] && created="0"
+    [[ -z "$exp" ]] && exp="0"
+
+    printf "%-4s %-20s %-18s %-6s %-12s %-12s\n" "$i" "$key" "$ip" "$port" "$(backend_fmt_date "$created")" "$(backend_fmt_date "$exp")"
+  done < <(backend_lines)
+
+  if [[ "$i" -eq 0 ]]; then
+    echo -e "${YLW}No hay backends cargados.${NC}"
+  fi
+  return 0
+}
+
+backend_add_days_menu() {
+  echo -e "${CYA}Agregar días a un backend${NC}\n"
+  mapfile -t lines < <(backend_lines)
+  [[ "${#lines[@]}" -gt 0 ]] || { echo -e "${YLW}No hay backends.${NC}"; return 0; }
+
+  local i=0 key url ipport ip port
+  for line in "${lines[@]}"; do
+    i=$((i+1))
+    key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
+    url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
+    ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
+    printf "%-3s) %-22s -> %s:%s\n" "$i" "$key" "$ip" "$port"
+  done
+
+  echo
+  read -r -p "Número: " n
+  [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${RED}Inválido.${NC}"; return 0; }
+  (( n>=1 && n<=${#lines[@]} )) || { echo -e "${RED}Fuera de rango.${NC}"; return 0; }
+
+  local picked="${lines[$((n-1))]}"
+  key="$(echo "$picked" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
+  url="$(echo "$picked" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
+  ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
+
+  read -r -p "Sumar días (ej: 30): " days
+  [[ "$days" =~ ^[0-9]+$ ]] || { echo -e "${RED}Días inválidos.${NC}"; return 0; }
+  (( days>=1 && days<=3650 )) || { echo -e "${RED}Días fuera de rango.${NC}"; return 0; }
+
+  local now line created exp newexp
+  now="$(date +%s)"
+  line="$(backend_meta_get "$key" || true)"
+  created="$(echo "$line" | awk -F'|' '{print $4}')"
+  exp="$(echo "$line" | awk -F'|' '{print $5}')"
+  [[ -z "$created" || "$created" == "0" ]] && created="$now"
+  [[ -z "$exp" ]] && exp="0"
+
+  if [[ "$exp" == "0" ]]; then
+    newexp="$((now + days*86400))"
+  else
+    newexp="$((exp + days*86400))"
+  fi
+
+  backend_meta_upsert "$key" "$ip" "$port" "$created" "$newexp"
+  echo -e "${GRN}✅ Actualizado.${NC} Vence: $(backend_fmt_date "$newexp")"
+  return 0
+}
+
+backend_delete_expired() {
+  echo -e "${CYA}Eliminar backends expirados${NC}\n"
+  [[ -f "$BACKEND_META_FILE" ]] || { echo -e "${YLW}No hay metadatos aún.${NC}"; return 0; }
+
+  local now removed=0
+  now="$(date +%s)"
+
+  while IFS='|' read -r k ip port created exp; do
+    [[ -z "$k" ]] && continue
+    [[ -z "$exp" ]] && exp="0"
+    if [[ "$exp" != "0" && "$exp" =~ ^[0-9]+$ && "$exp" -lt "$now" ]]; then
+      echo -e "${YLW}🗑️ Expirado:${NC} $k (venció $(backend_fmt_date "$exp"))"
+      backend_delete_by_key "$k" >/dev/null 2>&1 && removed=$((removed+1)) || true
+    fi
+  done < "$BACKEND_META_FILE"
+
+  if [[ "$removed" -eq 0 ]]; then
+    echo -e "${GRN}✅ No hay expirados.${NC}"
+  else
+    echo -e "${GRN}✅ Eliminados:${NC} $removed"
+  fi
+  return 0
+}
+
+add_backend_menu() {
+  while true; do
+    echo -e "${WHT}➕ Gestión de Backends${NC}"
+    echo -e "${DIM}Crear backends manual o con vencimiento (días).${NC}\n"
+    echo "1) ➕ Crear backend (manual, sin vencimiento)"
+    echo "2) 📅 Crear backend con días (expira)"
+    echo "3) 📋 Listar backends con fechas (creación/expiración)"
+    echo "4) ➕ Sumar días a un backend"
+    echo "5) 🗑️  Eliminar backend (manual)"
+    echo "6) 🧹 Eliminar expirados"
+    echo "0) Volver"
+    echo
+    read -r -p "Opción: " o
+    echo
+    case "$o" in
+      1) add_backend; pause ;;
+      2) backend_add_with_days; pause ;;
+      3) backend_list_with_dates; pause ;;
+      4) backend_add_days_menu; pause ;;
+      5) delete_backend_pick; pause ;;
+      6) backend_delete_expired; pause ;;
+      0) return 0 ;;
+      *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
+    esac
+  done
+}
+
 add_backend() {
   echo -e "${CYA}Agregar backend (nombre + IP + puerto)${NC}"
   echo -e "${DIM}Ejemplo: svpnene38 -> 179.43.112.38:80${NC}\n"
@@ -1904,6 +2155,17 @@ add_backend() {
   ensure_mothers_include
   write_apply_conf
   nginx_test_reload
+
+  # guardar meta (creación) sin vencimiento
+  local now line created exp
+  now="$(date +%s)"
+  line="$(backend_meta_get "$key" || true)"
+  created="$(echo "$line" | awk -F'|' '{print $4}')"
+  exp="$(echo "$line" | awk -F'|' '{print $5}')"
+  [[ -z "$created" || "$created" == "0" ]] && created="$now"
+  [[ -z "$exp" ]] && exp="0"
+  backend_meta_upsert "$key" "$ip" "$port" "$created" "$exp"
+
   return 0
 }
 
@@ -1949,6 +2211,8 @@ delete_backend_pick() {
   (( n>=1 && n<=${#lines[@]} )) || { echo -e "${RED}Fuera de rango.${NC}"; return 0; }
 
   target="${lines[$((n-1))]}"
+  local delkey
+  delkey="$(echo "$target" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
   awk -v t="$target" '$0!=t{print}' "$NGX_BACKENDS_MAP" > "${NGX_BACKENDS_MAP}.tmp" || true
   mv "${NGX_BACKENDS_MAP}.tmp" "$NGX_BACKENDS_MAP"
 
@@ -1958,6 +2222,7 @@ delete_backend_pick() {
   write_apply_conf
   nginx_test_reload
   echo -e "${GRN}✅ Eliminado.${NC}"
+  backend_meta_remove "${delkey:-}" >/dev/null 2>&1 || true
   return 0
 }
 
@@ -2833,7 +3098,7 @@ main() {
 
     case "$opt" in
       1) domains_menu ;;
-      2) add_backend; pause ;;
+      2) add_backend_menu ;;
       3) list_backends; pause ;;
       4) list_domains; pause ;;
       5) delete_backend_pick; pause ;;
