@@ -5,6 +5,70 @@ APP_NAME="Backend Manager Nenenet 3.0"
 PANEL_URL="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main/backendmgr"
 PANEL_DST="/usr/local/bin/backendmgr"
 
+# ------------------ NGINX WRAPPER (SAFE) ------------------
+# Creamos /usr/local/bin/nginx como wrapper para abrir el panel cuando se ejecuta "nginx" sin argumentos.
+# IMPORTANTÍSIMO: el instalador NO usa este wrapper para reload/test: usa /usr/sbin/nginx real.
+ensure_safe_nginx_wrapper() {
+  local WRAP="/usr/local/bin/nginx"
+  local REAL="/usr/sbin/nginx"
+  mkdir -p /usr/local/bin >/dev/null 2>&1 || true
+
+  # Backup si existía algo raro
+  if [[ -e "$WRAP" ]]; then
+    cp -a "$WRAP" "${WRAP}.bak.$(date +%F_%H%M%S)" >/dev/null 2>&1 || true
+  fi
+
+  cat > "$WRAP" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+LOG="/var/log/backendmgr.wrapper.log"
+PANEL="/usr/local/bin/backendmgr"
+REAL="/usr/sbin/nginx"
+
+run_panel() {
+  local rc=0
+
+  if [[ -x "$PANEL" ]]; then
+    "$PANEL" || rc=$?
+  else
+    echo "❌ No existe el panel en: $PANEL" >&2
+    rc=127
+  fi
+
+  # Solo avisar si hubo error
+  if [[ "${rc}" =~ ^[0-9]+$ ]] && [[ "$rc" -ne 0 ]]; then
+    if [[ -r /dev/tty && -w /dev/tty ]]; then
+      echo
+      echo "⚠️ El panel terminó (rc=$rc). Log: $LOG" >/dev/tty
+      read -r -p "Enter para volver..." _ </dev/tty || true
+    fi
+  fi
+  return "$rc"
+}
+
+# Si se llama con argumentos, delega al nginx real
+if [[ "$#" -gt 0 ]]; then
+  exec "$REAL" "$@"
+fi
+
+run_panel
+EOF
+
+  chmod +x "$WRAP"
+}
+
+nginx_real_test_and_reload() {
+  # Evita llamar al wrapper (si existe) y usa el binario real
+  /usr/sbin//usr/sbin/nginx -t
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl reload nginx || systemctl restart nginx
+  else
+    /usr/sbin/nginx -s reload || true
+  fi
+}
+
+
 CFG_DIR="/etc/backendmgr"
 CFG_FILE="${CFG_DIR}/config.json"
 
@@ -284,7 +348,7 @@ install_wrapper_nginx(){
 
   cat > "$SBIN" <<'WRAP'
 #!/usr/bin/env bash
-set -Eeuo pipefail
+set -euo pipefail
 
 PANEL="/usr/local/bin/backendmgr"
 REAL="/usr/sbin/nginx.real"
@@ -292,21 +356,15 @@ LOG="/var/log/backendmgr.wrapper.log"
 
 log() {
   mkdir -p /var/log 2>/dev/null || true
-  printf "[%s] %s
-" "$(date +%F\ %T)" "$*" >>"$LOG" 2>/dev/null || true
+  printf "[%s] %s\n" "$(date +%F\ %T)" "$*" >>"$LOG" 2>/dev/null || true
 }
 
 run_panel() {
-  local rc=0
   log "RUN_PANEL user=$(id -u) tty=$(tty 2>/dev/null || echo none) cwd=$(pwd)"
 
   if [[ ! -x "$PANEL" ]]; then
-    log "ERROR panel no executable: $PANEL"
-    if [[ -r /dev/tty && -w /dev/tty ]]; then
-      echo "ERROR: no existe o no es ejecutable: $PANEL" >/dev/tty 2>/dev/null || true
-    else
-      echo "ERROR: no existe o no es ejecutable: $PANEL" >&2
-    fi
+    echo "ERROR: no existe o no es ejecutable: $PANEL" >/dev/tty 2>/dev/null || true
+    log "ERROR panel no executable"
     return 127
   fi
 
@@ -322,8 +380,7 @@ run_panel() {
 
   log "PANEL_EXIT rc=$rc"
 
-  # Solo avisar si hubo error
-  if [[ "$rc" -ne 0 ]] && [[ -r /dev/tty && -w /dev/tty ]]; then
+  if [[ -r /dev/tty && -w /dev/tty ]]; then
     echo "" >/dev/tty
     echo "⚠️ El panel terminó (rc=$rc). Log: $LOG" >/dev/tty
     read -r -p "Enter para volver..." _ </dev/tty || true
@@ -332,22 +389,19 @@ run_panel() {
   return "$rc"
 }
 
-# Si se llama sin argumentos, abrir panel
 if [[ $# -eq 0 ]]; then
   run_panel
   exit $?
 fi
 
 case "${1:-}" in
-  menu|panel|elnene)
+  menu|panel|nenenet)
     run_panel
     exit $?
   ;;
 esac
 
-# Delegar al nginx real
 if [[ ! -x "$REAL" ]]; then
-  # fallback por si no existe .real
   REAL="/usr/sbin/nginx"
 fi
 exec "$REAL" "$@"
@@ -380,12 +434,10 @@ main(){
   echo "[5/8] nginx.conf include..."
   ensure_nginx_conf_include
 
-  echo "[7/8] Reload..."
-  nginx -t
-  nginx -s reload >/dev/null 2>&1 || true
+  ensure_safe_nginx_wrapper
 
-  install_wrapper_nginx
-
+echo "[7/8] Reload..."
+nginx_real_test_and_reload
   echo "[8/8] ✅ Listo. Abrir panel con: nginx  (o sudo nginx)"
 }
 
