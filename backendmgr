@@ -506,9 +506,9 @@ nginx_sched_banner_info() {
     [[ "$a" == "restart" ]] && label="RST"
     if [[ "$state" == "ON" ]]; then
       if [[ -n "$interval" ]]; then
-        out+="${label}:${interval} "
+        out+="${label}:${interval} (últ:${last}) "
       else
-        out+="${label}:ON "
+        out+="${label}:ON (últ:${last}) "
       fi
     else
       out+="${label}:OFF "
@@ -558,12 +558,12 @@ ramrefresh_last_line() {
 
   if [[ "$is_on" == "ON" ]]; then
     if [[ -n "$interval" ]]; then
-      echo "🧹 Refresco RAM: ON (cada ${interval}) | ${ngx_sched}"
+      echo "🧹 Refresco RAM: ON (cada ${interval}) | último: ${last} | ${ngx_sched}"
     else
-      echo "🧹 Refresco RAM: ON | ${ngx_sched}"
+      echo "🧹 Refresco RAM: ON | último: ${last} | ${ngx_sched}"
     fi
   else
-    echo "🧹 Refresco RAM: OFF | ${ngx_sched}"
+    echo "🧹 Refresco RAM: OFF | último: ${last} | ${ngx_sched}"
   fi
   return 0
 }
@@ -3003,36 +3003,41 @@ restore_nginx_binary(){
 
 
 ensure_nginx_wrapper_quiet_on_success(){
-  local SBIN="/usr/sbin/nginx"
-  [[ -f "$SBIN" ]] || return 0
+  # Algunos servers tienen wrapper en /usr/sbin/nginx y otros en /usr/local/bin/nginx
+  local candidates=(/usr/sbin/nginx /usr/local/bin/nginx /usr/bin/nginx)
+  local SBIN
 
-  # Solo aplica si es nuestro wrapper (usa backendmgr.wrapper.log)
-  grep -q "backendmgr.wrapper.log" "$SBIN" 2>/dev/null || return 0
+  for SBIN in "${candidates[@]}"; do
+    [[ -f "$SBIN" ]] || continue
 
-  # Si ya está parchado, salir
-  grep -q 'if \[\[ "\$rc" -ne 0 \]\]' "$SBIN" 2>/dev/null && return 0
+    # Solo aplica si es nuestro wrapper (usa backendmgr.wrapper.log)
+    grep -q "backendmgr.wrapper.log" "$SBIN" 2>/dev/null || continue
 
-  # Parche: mostrar "Enter para volver" SOLO si rc != 0
-  local tmp
-  tmp="$(mktemp)"
-  perl -0777 -pe '
-    s/if\s+\[\[\s+-r\s+\/dev\/tty\s+&&\s+-w\s+\/dev\/tty\s+\]\]\s*;\s*then\s*
-      (.*?)\s*
-      read\s+-r\s+-p\s+"Enter\s+para\s+volver\.\.\."\s+_\s*<\s*\/dev\/tty\s*\|\|\s*true\s*
+    # Si ya está parchado (usa rc default-safe), salir
+    grep -q 'rc="\${rc:-0}"' "$SBIN" 2>/dev/null && continue
+
+    # Parche robusto para set -u: rc puede no existir → rc="${rc:-0}"
+    # Y mostrar el mensaje/Enter SOLO si rc != 0
+    local tmp
+    tmp="$(mktemp)"
+    perl -0777 -pe '
+      s/if\s+\[\[\s+-r\s+\/dev\/tty\s+&&\s+-w\s+\/dev\/tty\s+\]\]\s*;\s*then\s*
+        (.*?)
       \s*fi
-    /if [[ -r \/dev\/tty && -w \/dev\/tty ]]; then\n  # Solo avisar si hubo error\n  if [[ \"$rc\" -ne 0 ]]; then\n$1\n    read -r -p \"Enter para volver...\" _ <\/dev\/tty || true\n  fi\nfi/sx
-  ' "$SBIN" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+      /if [[ -r \/dev\/tty && -w \/dev\/tty ]]; then\n  rc="\\${rc:-0}"\n  # Solo avisar si hubo error\n  if [[ "\\$rc" -ne 0 ]]; then\n$1\n    read -r -p "Enter para volver..." _ <\/dev\/tty || true\n  fi\nfi/sx
+    ' "$SBIN" > "$tmp" 2>/dev/null || { rm -f "$tmp"; continue; }
 
-  # Si el parche no cambió nada (no matcheó), no tocamos
-  if cmp -s "$SBIN" "$tmp"; then
+    # Si el parche no cambió nada (no matcheó), no tocamos
+    if cmp -s "$SBIN" "$tmp"; then
+      rm -f "$tmp"
+      continue
+    fi
+
+    cp -a "$SBIN" "${SBIN}.bak.$(date +%F_%H%M%S)" 2>/dev/null || true
+    cat "$tmp" > "$SBIN"
+    chmod 755 "$SBIN" 2>/dev/null || true
     rm -f "$tmp"
-    return 0
-  fi
-
-  cp -a "$SBIN" "${SBIN}.bak.$(date +%F_%H%M%S)" 2>/dev/null || true
-  cat "$tmp" > "$SBIN"
-  chmod 755 "$SBIN" 2>/dev/null || true
-  rm -f "$tmp"
+  done
 }
 
 
