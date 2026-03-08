@@ -3001,6 +3001,41 @@ restore_nginx_binary(){
   rm -f /usr/local/bin/nginx /usr/bin/nginx 2>/dev/null || true
 }
 
+
+ensure_nginx_wrapper_quiet_on_success(){
+  local SBIN="/usr/sbin/nginx"
+  [[ -f "$SBIN" ]] || return 0
+
+  # Solo aplica si es nuestro wrapper (usa backendmgr.wrapper.log)
+  grep -q "backendmgr.wrapper.log" "$SBIN" 2>/dev/null || return 0
+
+  # Si ya está parchado, salir
+  grep -q 'if \[\[ "\$rc" -ne 0 \]\]' "$SBIN" 2>/dev/null && return 0
+
+  # Parche: mostrar "Enter para volver" SOLO si rc != 0
+  local tmp
+  tmp="$(mktemp)"
+  perl -0777 -pe '
+    s/if\s+\[\[\s+-r\s+\/dev\/tty\s+&&\s+-w\s+\/dev\/tty\s+\]\]\s*;\s*then\s*
+      (.*?)\s*
+      read\s+-r\s+-p\s+"Enter\s+para\s+volver\.\.\."\s+_\s*<\s*\/dev\/tty\s*\|\|\s*true\s*
+      \s*fi
+    /if [[ -r \/dev\/tty && -w \/dev\/tty ]]; then\n  # Solo avisar si hubo error\n  if [[ \"$rc\" -ne 0 ]]; then\n$1\n    read -r -p \"Enter para volver...\" _ <\/dev\/tty || true\n  fi\nfi/sx
+  ' "$SBIN" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+
+  # Si el parche no cambió nada (no matcheó), no tocamos
+  if cmp -s "$SBIN" "$tmp"; then
+    rm -f "$tmp"
+    return 0
+  fi
+
+  cp -a "$SBIN" "${SBIN}.bak.$(date +%F_%H%M%S)" 2>/dev/null || true
+  cat "$tmp" > "$SBIN"
+  chmod 755 "$SBIN" 2>/dev/null || true
+  rm -f "$tmp"
+}
+
+
 uninstall_backendmgr(){
   echo -e "${RED}🗑️  DESINSTALAR Backend Manager${NC}"
   echo -e "${DIM}Esto elimina panel, configs, estado, timers y restaura /usr/sbin/nginx real.${NC}"
@@ -3045,10 +3080,9 @@ menu() {
   echo -e "${DIM}Elegí una opción (número) y Enter.${NC}"
   echo
   echo -e "${BCYA}[01]${NC} 🌐 Dominios madre (crear / editar / eliminar)"
-  echo -e "${BCYA}[02]${NC} ➕ Agregar backend (nombre + IP + puerto)"
-  echo -e "${BCYA}[03]${NC} 📄 Listar backends (backend / IP / puerto)"
+  echo -e "${BCYA}[02]${NC} ➕ Agregar backend (rápido: nombre + IP + puerto)"
+  echo -e "${BCYA}[03]${NC} 👥 Administrar usuarios backend (crear/editar/vencimiento)"
   echo -e "${BCYA}[04]${NC} 🌍 Listar dominios madre (servers)"
-  echo -e "${BCYA}[05]${NC} 🗑️  Eliminar backend"
   echo -e "${BCYA}[06]${NC} ✅ Healthcheck (HTTP y latencia)"
   echo -e "${BCYA}[07]${NC} 🧪 Validar conexión (dominio → backend por header)"
   echo -e "${BCYA}[08]${NC} 🧩 Editar timeouts del dominio madre (manual por nombre)"
@@ -3089,6 +3123,8 @@ main() {
       systemctl enable --now backendmgr-traffic-scan.timer >/dev/null 2>&1 || true
     fi
   fi
+  ensure_nginx_wrapper_quiet_on_success
+
 
   while true; do
     banner
@@ -3098,10 +3134,10 @@ main() {
 
     case "$opt" in
       1) domains_menu ;;
-      2) add_backend_menu ;;
-      3) list_backends; pause ;;
+      2) add_backend; pause ;;
+      3) add_backend_menu; pause ;;
       4) list_domains; pause ;;
-      5) delete_backend_pick; pause ;;
+      5) add_backend_menu; pause ;;  # alias (antes: eliminar backend)
       6) healthcheck_all; pause ;;
       7) validate_connection_test; pause ;;
       8) create_or_edit_server_http; pause ;;
