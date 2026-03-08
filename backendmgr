@@ -56,13 +56,23 @@ TRAFFIC_DB_LAST_RUN="${STATE_DIR}/traffic_last_run"
 
 
 # ------------------ COLORES ------------------
-NC='\033[0m'
-RED='\033[0;31m'
-GRN='\033[0;32m'
-YLW='\033[0;33m'
-CYA='\033[0;36m'
-WHT='\033[1;37m'
-DIM='\033[2m'
+NC='[0m'
+RED='[0;31m'
+GRN='[0;32m'
+YLW='[0;33m'
+BLU='[0;34m'
+MAG='[0;35m'
+CYA='[0;36m'
+WHT='[1;37m'
+DIM='[2m'
+BRED='[1;31m'
+BGRN='[1;32m'
+BBLU='[1;34m'
+BCYA='[1;36m'
+BG_RED='[41m'
+BG_BLUE='[44m'
+BG_DARK='[48;5;236m'
+BG_NONE='[49m'
 
 # ------------------ TTY + TRAPS ------------------
 mkdir -p /var/log 2>/dev/null || true
@@ -423,6 +433,43 @@ net_totals_line() {
   echo "📡 NET: ⬇️ $(human_bytes "$rx") | ⬆️ $(human_bytes "$tx") (desde boot)"
 }
 
+
+strip_ansi() { sed -r "s/\x1B\[[0-9;]*[mK]//g" <<<"${1:-}"; }
+
+disp_trunc() {
+  # trunca a N columnas (aprox, sin cortar palabras si puede)
+  local s="${1:-}" n="${2:-60}"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - <<'PY' "$s" "$n" 2>/dev/null || true
+import sys
+s=sys.argv[1]
+n=int(sys.argv[2])
+if len(s)<=n:
+  print(s)
+else:
+  print(s[:max(0,n-1)]+"…")
+PY
+  else
+    if ((${#s}>n)); then echo "${s:0:$((n-1))}…"; else echo "$s"; fi
+  fi
+}
+
+server_ip_short() {
+  # intenta IP pública, si no, IP local principal
+  local ip=""
+  if command -v curl >/dev/null 2>&1; then
+    ip="$(timeout 2s curl -fsSL https://api.ipify.org 2>/dev/null || true)"
+  fi
+  if [[ -z "$ip" ]]; then
+    ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/src/{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)"
+  fi
+  if [[ -z "$ip" ]]; then
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  fi
+  [[ -z "$ip" ]] && ip="(sin IP)"
+  echo "$ip"
+}
+
 nginx_sched_banner_info() {
   # Devuelve info breve de nginx reload/restart programado y último run
   local out=""
@@ -601,6 +648,10 @@ banner() {
   clear || true
   read_cfg 2>/dev/null || true
 
+  local dt ip
+  dt="$(date '+%d/%m/%Y %H:%M:%S')"
+  ip="$(server_ip_short)"
+
   local ng_state dom_active bcount dcount bkp
   ng_state="$(nginx_state)"
   dom_active="$(primary_domain_active)"
@@ -608,43 +659,59 @@ banner() {
   dcount="$(domain_count)"
   bkp="$(last_backup_info)"
 
-  local l1 l2 l3 l4 l5 l6 l7 l8 l9 l10
-  l1="🚀 ${APP_NAME} v${APP_VER}"
-  l2="🟢 Nginx: ${ng_state} | 🌐 Dominios: ${dcount} ($(domains_active_list)) | 🧱 Backends: ${bcount}"
-  l3="👑 Dominio madre activo: ${dom_active} | 📜 Lista: $(domains_active_list)"
-  l4="🏷️  Header: ${HEADER_NAME} | 📈 Tráfico: $(traffic_log_state_short) | 🔎 Scanner: $(traffic_scan_state_short)"
-  l5="💾 Backup: ${bkp}"
-  l6=""
-  l7="$(mem_used_line)"
-  l8="$(cpu_line)"
-  l9="$(disk_usage_line)"
-  l10="$(net_totals_line)"
-  l11="$(ramrefresh_last_line)"
+  local traffic_s scan_s
+  traffic_s="$(traffic_log_state_short)"
+  scan_s="$(traffic_scan_state_short)"
 
-  local W=62
-  local n
-  for n in $(disp_width "$l1") $(disp_width "$l2") $(disp_width "$l3") $(disp_width "$l4") $(disp_width "$l5") $(disp_width "$l6") $(disp_width "$l7") $(disp_width "$l8") $(disp_width "$l9") $(disp_width "$l10") $(disp_width "$l11"); do
-    (( n > W )) && W="$n"
-  done
-  (( W < 62 )) && W=62
-  (( W > 90 )) && W=90
+  # Título
+  local title="🔥  BACKEND MANAGER NENENET 3.0 v${APP_VER}  🔥"
+  local W=78
 
-  echo -e "${CYA}╔$(printf '═%.0s' $(seq 1 $((W+2))))╗${NC}"
-  box_line_center "$W" "$l1"
-  box_line "$W" "────────────────────────────────────────────────────────"
-  box_line "$W" "$l2"
-  box_line "$W" "$l3"
-  box_line "$W" "$l4"
-  box_line "$W" "$l5"
-  [[ -n "${l6:-}" ]] && box_line "$W" "$l6"
-  box_line "$W" "$l7"
-  box_line "$W" "$l8"
-  box_line "$W" "$l9"
-  box_line "$W" "$l10"
-  box_line "$W" "$l11"
-  echo -e "${CYA}╚$(printf '═%.0s' $(seq 1 $((W+2))))╝${NC}"
+  printf "${BG_RED}${WHT}%s${NC}${BG_NONE}
+" "$(printf "%-*s" "$W" "$title")"
+  printf "${BG_DARK}${BCYA}%s${NC}${BG_NONE}
+" "$(printf "%-*s" "$W" "")"
+  printf "${BG_DARK}${WHT}  📅 FECHA: ${GRN}%-19s${WHT}   🌐 IP: ${GRN}%-15s${NC}${BG_NONE}
+" "$dt" "$ip"
+  printf "${BG_DARK}${BCYA}%s${NC}${BG_NONE}
+" "$(printf "%-*s" "$W" "")"
+
+  # Estado general (2 columnas)
+  local ngx_label ngx_color
+  if [[ "$ng_state" == "ON" ]]; then ngx_label="✅ ACTIVO"; ngx_color="${BGRN}"; else ngx_label="❌ OFF"; ngx_color="${BRED}"; fi
+
+  printf "${BG_DARK}  ⚙️  Nginx: ${ngx_color}%-10s${WHT}   📁 Dominios: ${GRN}%-3s${WHT}   🧱 Backends: ${GRN}%-3s${NC}${BG_NONE}
+" "$ngx_label" "$dcount" "$bcount"
+  printf "${BG_DARK}  👑 Dominio madre: ${GRN}%-52s${NC}${BG_NONE}
+" "$(disp_trunc "$dom_active" 52)"
+  printf "${BG_DARK}  🏷️  Header: ${GRN}%-12s${WHT}   📈 Tráfico: ${GRN}%-12s${WHT}   🔎 Scanner: ${GRN}%-18s${NC}${BG_NONE}
+" \
+    "$(disp_trunc "$HEADER_NAME" 12)" "$(disp_trunc "$traffic_s" 12)" "$(disp_trunc "$scan_s" 18)"
+  printf "${BG_DARK}  💾 Backup: ${GRN}%-60s${NC}${BG_NONE}
+" "$(disp_trunc "$bkp" 60)"
+
+  printf "${BG_DARK}${BCYA}%s${NC}${BG_NONE}
+" "$(printf "%-*s" "$W" "")"
+
+  # Recursos (líneas compactas)
+  printf "${BG_DARK}  %s${NC}${BG_NONE}
+" "$(strip_ansi "$(disk_usage_line)" | sed 's/^💽 DISK: /💽 DISCO: /')"
+  printf "${BG_DARK}  %s${NC}${BG_NONE}
+" "$(strip_ansi "$(mem_used_line)" | sed 's/^🧠 RAM: /🧠 RAM: /')"
+  printf "${BG_DARK}  %s${NC}${BG_NONE}
+" "$(strip_ansi "$(cpu_line)")"
+  printf "${BG_DARK}  %s${NC}${BG_NONE}
+" "$(strip_ansi "$(net_totals_line)" | sed 's/^📡 NET: /📡 RED: /')"
+
+  # Timers
+  printf "${BG_DARK}  %s${NC}${BG_NONE}
+" "$(strip_ansi "$(ramrefresh_last_line)")"
+
+  printf "${BG_DARK}${BCYA}%s${NC}${BG_NONE}
+" "$(printf "%-*s" "$W" "")"
   echo
 }
+
 
 validate_domain() { [[ "$1" =~ ^[A-Za-z0-9.-]{3,253}$ ]]; }
 validate_key() { [[ "$1" =~ ^[A-Za-z0-9_.:-]{2,64}$ ]]; }
@@ -2630,26 +2697,107 @@ speedtest_menu() {
   return 0
 }
 
+
+# ------------------ UNINSTALL (integrado al panel) ------------------
+stop_disable_unit(){
+  local u="$1"
+  have_systemd || return 0
+  systemctl disable --now "$u" >/dev/null 2>&1 || true
+  systemctl stop "$u" >/dev/null 2>&1 || true
+}
+
+cleanup_systemd(){
+  have_systemd || return 0
+  for u in \
+    backendmgr-ramrefresh.timer backendmgr-ramrefresh.service \
+    backendmgr-traffic-scan.timer backendmgr-traffic-scan.service \
+    backendmgr-cleanup.timer backendmgr-cleanup.service \
+    backendmgr-nginx-reload.timer backendmgr-nginx-reload.service \
+    backendmgr-nginx-restart.timer backendmgr-nginx-restart.service
+  do
+    stop_disable_unit "$u"
+    rm -f "/etc/systemd/system/${u}" 2>/dev/null || true
+  done
+  systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
+restore_nginx_binary(){
+  local SBIN="/usr/sbin/nginx"
+  local REAL="/usr/sbin/nginx.real"
+
+  have_systemd && systemctl stop nginx >/dev/null 2>&1 || true
+
+  if [[ -x "$REAL" ]]; then
+    rm -f "$SBIN" 2>/dev/null || true
+    mv "$REAL" "$SBIN" 2>/dev/null || true
+    chmod 755 "$SBIN" 2>/dev/null || true
+  fi
+
+  rm -f /usr/local/bin/nginx /usr/bin/nginx 2>/dev/null || true
+}
+
+uninstall_backendmgr(){
+  echo -e "${RED}🗑️  DESINSTALAR Backend Manager${NC}"
+  echo -e "${DIM}Esto elimina panel, configs, estado, timers y restaura /usr/sbin/nginx real.${NC}"
+  echo
+  read -r -p "Confirmar desinstalación TOTAL (s/N): " yn
+  case "${yn,,}" in
+    s|si|sí|y|yes) ;;
+    *) echo -e "${YLW}Cancelado.${NC}"; return 0 ;;
+  esac
+
+  echo
+  echo "[1/6] Deteniendo timers/servicios..."
+  cleanup_systemd
+
+  echo "[2/6] Restaurando nginx (quitando wrapper si existía)..."
+  restore_nginx_binary
+
+  echo "[3/6] Removiendo panel..."
+  rm -f /usr/local/bin/backendmgr 2>/dev/null || true
+
+  echo "[4/6] Removiendo configs..."
+  rm -rf /etc/backendmgr 2>/dev/null || true
+  rm -rf /etc/nginx/conf.d/backendmgr 2>/dev/null || true
+
+  echo "[5/6] Removiendo estado y logs..."
+  rm -rf /var/lib/backendmgr 2>/dev/null || true
+  rm -f /var/log/backendmgr.panel.log /var/log/backendmgr.wrapper.log 2>/dev/null || true
+
+  echo "[6/6] Removiendo backups..."
+  rm -rf /etc/nginx/backendmgr-backups 2>/dev/null || true
+
+  echo
+  echo -e "${GRN}✅ Listo. Backend Manager fue removido.${NC}"
+  echo -e "${DIM}Si querés desinstalar dependencias (nginx/jq/etc.), hacelo manualmente.${NC}"
+  echo
+  exit 0
+}
+
 # ------------------ MENU ------------------
 menu() {
   echo -e "${WHT}📌 MENÚ PRINCIPAL${NC}"
-  echo "  1) 🌐 Dominios madre (crear / editar / eliminar)"
-  echo "  2) ➕ Agregar backend (nombre + IP + puerto)"
-  echo "  3) 📄 Listar backends (backend / IP / puerto)"
-  echo "  4) 🌍 Listar dominios madre (servers)"
-  echo "  5) 🗑️  Eliminar backend"
-  echo "  6) ✅ Healthcheck (HTTP y latencia)"
-  echo "  7) 🧪 Validar conexión (dominio → backend por header)"
-  echo "  8) 🧩 Editar timeouts del dominio madre (manual por nombre)"
-  echo "  9) ⚖️ Balanceo de MADRES (VPS pool por dominio)"
-  echo " 10) 🚦 Limitar ancho de banda por IP o Backend (limit_rate)"
-  echo " 11) 📊 Tráfico por IP / Backend (stats log + scanner)"
-  echo " 12) 🔥 Firewall UFW: abrir puerto (80/443/otro)"
-  echo " 13) 💾 Backup y restauración"
-  echo " 15) ⚙️  Servicios de Nginx (Status/Stop/Start/Reload/Restart)"
-  echo " 16) 🚀 Speedtest (Ping / Bajada / Subida)"
-  echo " 17) 🧰 Mantenimiento programado (RAM / Nginx timers)"
-  echo "  0) 🚪 Salir"
+  echo -e "${DIM}Elegí una opción (número) y Enter.${NC}"
+  echo
+  echo -e "${BCYA}[01]${NC} 🌐 Dominios madre (crear / editar / eliminar)"
+  echo -e "${BCYA}[02]${NC} ➕ Agregar backend (nombre + IP + puerto)"
+  echo -e "${BCYA}[03]${NC} 📄 Listar backends (backend / IP / puerto)"
+  echo -e "${BCYA}[04]${NC} 🌍 Listar dominios madre (servers)"
+  echo -e "${BCYA}[05]${NC} 🗑️  Eliminar backend"
+  echo -e "${BCYA}[06]${NC} ✅ Healthcheck (HTTP y latencia)"
+  echo -e "${BCYA}[07]${NC} 🧪 Validar conexión (dominio → backend por header)"
+  echo -e "${BCYA}[08]${NC} 🧩 Editar timeouts del dominio madre (manual por nombre)"
+  echo -e "${BCYA}[09]${NC} ⚖️ Balanceo de MADRES (VPS pool por dominio)"
+  echo -e "${BCYA}[10]${NC} 🚦 Limitar ancho de banda por IP o Backend (limit_rate)"
+  echo -e "${BCYA}[11]${NC} 📊 Tráfico por IP / Backend (stats log + scanner)"
+  echo -e "${BCYA}[12]${NC} 🔥 Firewall UFW: abrir puerto (80/443/otro)"
+  echo -e "${BCYA}[13]${NC} 💾 Backup y restauración"
+  echo -e "${BCYA}[15]${NC} ⚙️  Servicios de Nginx (Status/Stop/Start/Reload/Restart)"
+  echo -e "${BCYA}[16]${NC} 🚀 Speedtest (Ping / Bajada / Subida)"
+  echo -e "${BCYA}[17]${NC} 🧰 Mantenimiento programado (RAM / Nginx timers)"
+  echo -e "${BCYA}[18]${NC} 🗑️  Desinstalar Backend Manager"
+  echo
+  echo -e "${BCYA}[00]${NC} 🚪 Salir"
   echo
 }
 
@@ -2701,6 +2849,7 @@ main() {
      15) nginx_services_menu; pause ;;
      16) speedtest_menu; pause ;;
      17) maintenance_menu; pause ;;
+     18) uninstall_backendmgr ;;
       0) exit 0 ;;
       *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
     esac
