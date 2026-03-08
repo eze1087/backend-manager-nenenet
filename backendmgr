@@ -506,9 +506,9 @@ nginx_sched_banner_info() {
     [[ "$a" == "restart" ]] && label="RST"
     if [[ "$state" == "ON" ]]; then
       if [[ -n "$interval" ]]; then
-        out+="${label}:${interval} (últ:${last}) "
+        out+="${label}:${interval} "
       else
-        out+="${label}:ON (últ:${last}) "
+        out+="${label}:ON "
       fi
     else
       out+="${label}:OFF "
@@ -558,12 +558,12 @@ ramrefresh_last_line() {
 
   if [[ "$is_on" == "ON" ]]; then
     if [[ -n "$interval" ]]; then
-      echo "🧹 Refresco RAM: ON (cada ${interval}) | último: ${last} | ${ngx_sched}"
+      echo "🧹 Refresco RAM: ON (cada ${interval}) | ${ngx_sched}"
     else
-      echo "🧹 Refresco RAM: ON | último: ${last} | ${ngx_sched}"
+      echo "🧹 Refresco RAM: ON | ${ngx_sched}"
     fi
   else
-    echo "🧹 Refresco RAM: OFF | último: ${last} | ${ngx_sched}"
+    echo "🧹 Refresco RAM: OFF | ${ngx_sched}"
   fi
   return 0
 }
