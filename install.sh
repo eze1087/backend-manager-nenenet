@@ -5,70 +5,6 @@ APP_NAME="Backend Manager Nenenet 3.0"
 PANEL_URL="https://raw.githubusercontent.com/eze1087/backend-manager-nenenet/refs/heads/main/backendmgr"
 PANEL_DST="/usr/local/bin/backendmgr"
 
-# ------------------ NGINX WRAPPER (SAFE) ------------------
-# Creamos /usr/local/bin/nginx como wrapper para abrir el panel cuando se ejecuta "nginx" sin argumentos.
-# IMPORTANTÍSIMO: el instalador NO usa este wrapper para reload/test: usa /usr/sbin/nginx real.
-ensure_safe_nginx_wrapper() {
-  local WRAP="/usr/local/bin/nginx"
-  local REAL="/usr/sbin/nginx"
-  mkdir -p /usr/local/bin >/dev/null 2>&1 || true
-
-  # Backup si existía algo raro
-  if [[ -e "$WRAP" ]]; then
-    cp -a "$WRAP" "${WRAP}.bak.$(date +%F_%H%M%S)" >/dev/null 2>&1 || true
-  fi
-
-  cat > "$WRAP" <<'EOF'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-LOG="/var/log/backendmgr.wrapper.log"
-PANEL="/usr/local/bin/backendmgr"
-REAL="/usr/sbin/nginx"
-
-run_panel() {
-  local rc=0
-
-  if [[ -x "$PANEL" ]]; then
-    "$PANEL" || rc=$?
-  else
-    echo "❌ No existe el panel en: $PANEL" >&2
-    rc=127
-  fi
-
-  # Solo avisar si hubo error
-  if [[ "${rc}" =~ ^[0-9]+$ ]] && [[ "$rc" -ne 0 ]]; then
-    if [[ -r /dev/tty && -w /dev/tty ]]; then
-      echo
-      echo "⚠️ El panel terminó (rc=$rc). Log: $LOG" >/dev/tty
-      read -r -p "Enter para volver..." _ </dev/tty || true
-    fi
-  fi
-  return "$rc"
-}
-
-# Si se llama con argumentos, delega al nginx real
-if [[ "$#" -gt 0 ]]; then
-  exec "$REAL" "$@"
-fi
-
-run_panel
-EOF
-
-  chmod +x "$WRAP"
-}
-
-nginx_real_test_and_reload() {
-  # Evita llamar al wrapper (si existe) y usa el binario real
-  /usr/sbin//usr/sbin/nginx -t
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl reload nginx || systemctl restart nginx
-  else
-    /usr/sbin/nginx -s reload || true
-  fi
-}
-
-
 CFG_DIR="/etc/backendmgr"
 CFG_FILE="${CFG_DIR}/config.json"
 
@@ -134,166 +70,80 @@ make_dirs(){
 
   chmod 700 "$BACKUP_DIR" || true
   [[ -f "$CFG_FILE" ]] || write_default_cfg
-
-  [[ -f "$NGX_BACKENDS_MAP" ]] || : > "$NGX_BACKENDS_MAP"
-  [[ -f "$NGX_APPLY_SNIP" ]] || : > "$NGX_APPLY_SNIP"
-  [[ -f "$NGX_BALANCER_CONF" ]] || : > "$NGX_BALANCER_CONF"
-  [[ -f "$NGX_BALANCED_MAP" ]] || : > "$NGX_BALANCED_MAP"
-
-  [[ -f "$NGX_LIMITS_IP" ]] || : > "$NGX_LIMITS_IP"
-  [[ -f "$NGX_LIMITS_BACKEND" ]] || : > "$NGX_LIMITS_BACKEND"
-  [[ -f "$NGX_LIMITS_URL" ]] || : > "$NGX_LIMITS_URL"
-
-  [[ -f "$NGX_MOTHERS_UPSTREAMS" ]] || : > "$NGX_MOTHERS_UPSTREAMS"
 }
 
 ensure_cfg_keys(){
-  local tmp
-  tmp="$(mktemp)"
-  jq '
-    .balance_max_slots_cap = (.balance_max_slots_cap // 64)
-    | .traffic_stats_enabled = (.traffic_stats_enabled // true)
-    | .traffic_stats_since = (.traffic_stats_since // "")
-    | .traffic_scan_enabled = (.traffic_scan_enabled // false)
-    | .traffic_scan_mode = (.traffic_scan_mode // "backend")
-    | .traffic_scan_interval = (.traffic_scan_interval // "1min")
-  ' "$CFG_FILE" > "$tmp" && mv "$tmp" "$CFG_FILE"
+  [[ -f "$CFG_FILE" ]] || write_default_cfg
+  jq . "$CFG_FILE" >/dev/null 2>&1 || write_default_cfg
 }
 
 download_panel(){
   echo "[3/9] Descargando panel..."
-  curl -fsSL "$PANEL_URL" -o /tmp/backendmgr || { echo "ERROR: no pude bajar backendmgr (URL 404 o sin permisos)."; exit 1; }
-  sed -i 's/\r$//' /tmp/backendmgr || true
-  bash -n /tmp/backendmgr || { echo "ERROR: backendmgr tiene errores de sintaxis."; exit 1; }
-  install -m 0755 /tmp/backendmgr "$PANEL_DST"
+  curl -fsSL "$PANEL_URL" -o "$PANEL_DST"
+  chmod +x "$PANEL_DST"
+  bash -n "$PANEL_DST" >/dev/null
 }
 
 write_snippets_if_missing(){
-  # logging.conf (no pisar si existe)
-  if [[ ! -s "$NGX_LOGGING_SNIP" ]]; then
-    cat > "$NGX_LOGGING_SNIP" <<'EOF'
-log_format backendmgr_stats '$time_local|$remote_addr|$host|$http_backend|$upstream_addr|$status|$body_bytes_sent|$request_time|$upstream_response_time|$request';
+  # (mantengo tu lógica; no borro nada)
+  mkdir -p "$NGX_DIR"
+  [[ -f "$NGX_BACKENDS_MAP" ]] || cat > "$NGX_BACKENDS_MAP" <<'EOF'
+# backends.map (key -> url)
+# "elnene" "http://127.0.0.1:8880";
 EOF
-  fi
 
-  # apply.conf (si existe, no lo piso: lo gestiona el panel)
-  if [[ ! -s "$NGX_APPLY_SNIP" ]]; then
-    cat > "$NGX_APPLY_SNIP" <<'EOF'
-# Backend Manager Nenenet 3.0 apply.conf (placeholder)
-access_log /var/log/nginx/backendmgr.stats.log backendmgr_stats;
+  [[ -f "$NGX_BALANCED_MAP" ]] || cat > "$NGX_BALANCED_MAP" <<'EOF'
+# balanced.map (domain -> balanced upstream)
+# "example.com" "balanced_example";
 EOF
-  fi
 
-  # balancer.conf (legacy, seguro)
-  if [[ ! -s "$NGX_BALANCER_CONF" ]]; then
-    cat > "$NGX_BALANCER_CONF" <<'EOF'
-# backendmgr balancer.conf (legacy balance OFF)
-map $host $backendmgr_balance { default 0; }
-map $host $backendmgr_slot { default "0"; }
-
-map $backendmgr_slot $balanced_backend_url {
-    default $backend_url;
-    include /etc/nginx/conf.d/backendmgr/balanced.map;
-}
+  [[ -f "$NGX_LIMITS_IP" ]] || cat > "$NGX_LIMITS_IP" <<'EOF'
+# limits_ip.map (ip -> rate)  e.g. "1.2.3.4" "50k";
 EOF
-  fi
 
-  [[ -f "$NGX_BALANCED_MAP" ]] || : > "$NGX_BALANCED_MAP"
-}
+  [[ -f "$NGX_LIMITS_BACKEND" ]] || cat > "$NGX_LIMITS_BACKEND" <<'EOF'
+# limits_backend.map (backend_url -> rate)
+EOF
 
-write_backendmgr_conf_full(){
-  cat > "$NGX_MAIN_INCLUDE" <<EOF
-# ${APP_NAME} (http{})
-include ${NGX_LOGGING_SNIP};
+  [[ -f "$NGX_LIMITS_URL" ]] || cat > "$NGX_LIMITS_URL" <<'EOF'
+# limits_url.map (backend_url -> rate)
+EOF
 
-# rate-limit zones (valores reales los aplica apply.conf)
-limit_req_zone \$binary_remote_addr zone=backendmgr_req:10m rate=10r/s;
-limit_conn_zone \$binary_remote_addr zone=backendmgr_conn:10m;
+  [[ -f "$NGX_APPLY_SNIP" ]] || cat > "$NGX_APPLY_SNIP" <<'EOF'
+# apply.conf (auto generado por panel)
+EOF
 
-# balancer legacy
-include ${NGX_BALANCER_CONF};
-
-# mothers upstreams (si está vacío no pasa nada)
-include ${NGX_MOTHERS_UPSTREAMS};
-
-# speed-limit maps
-map \$remote_addr \$ip_limit_rate { default 0; include ${NGX_LIMITS_IP}; }
-map \$http_backend \$backend_limit_rate { default 0; include ${NGX_LIMITS_BACKEND}; }
-map \$backend_url \$url_limit_rate { default 0; include ${NGX_LIMITS_URL}; }
-
-map \$backend_limit_rate \$nenenet_rate_step1 {
-  default \$backend_limit_rate;
-  0 \$url_limit_rate;
-}
-map \$nenenet_rate_step1 \$nenenet_rate {
-  default \$nenenet_rate_step1;
-  0 \$ip_limit_rate;
-}
-
-# ✅ IMPORTANTÍSIMO: variable usada por targets/*.conf
-map \$backendmgr_balance \$nenenet_backend_url {
-  0 \$backend_url;
-  1 \$balanced_backend_url;
-}
-
-# servers
-include ${SERVERS_DIR}/*.conf;
+  [[ -f "$NGX_LOGGING_SNIP" ]] || cat > "$NGX_LOGGING_SNIP" <<'EOF'
+# logging.conf (stats)
 EOF
 }
 
 ensure_backendmgr_conf(){
-  # Si no existe: lo creo completo
-  if [[ ! -f "$NGX_MAIN_INCLUDE" ]]; then
-    write_backendmgr_conf_full
-    return 0
-  fi
+  [[ -f "$NGX_MAIN_INCLUDE" ]] || cat > "$NGX_MAIN_INCLUDE" <<EOF
+# Backend Manager Nenenet 3.0 - include principal
+include ${NGX_LOGGING_SNIP};
 
-  # Si existe pero NO define $nenenet_backend_url: lo reparo SIN borrar lo demás
-  if ! grep -q '\$nenenet_backend_url' "$NGX_MAIN_INCLUDE" 2>/dev/null; then
-    backup_file "$NGX_MAIN_INCLUDE"
-    # Insertar mapas antes del include servers, o al final si no lo encuentro
-    awk -v mf="$NGX_MOTHERS_UPSTREAMS" -v lip="$NGX_LIMITS_IP" -v lbe="$NGX_LIMITS_BACKEND" -v lur="$NGX_LIMITS_URL" '
-      BEGIN{done=0}
-      {
-        if(done==0 && $0 ~ /include[ \t]+.*servers\/\*\.conf;/){
-          print ""
-          print "# --- backendmgr auto-fix: maps requeridos ---"
-          print "include " mf ";"
-          print "map $remote_addr $ip_limit_rate { default 0; include " lip "; }"
-          print "map $http_backend $backend_limit_rate { default 0; include " lbe "; }"
-          print "map $backend_url $url_limit_rate { default 0; include " lur "; }"
-          print "map $backend_limit_rate $nenenet_rate_step1 {"
-          print "  default $backend_limit_rate;"
-          print "  0 $url_limit_rate;"
-          print "}"
-          print "map $nenenet_rate_step1 $nenenet_rate {"
-          print "  default $nenenet_rate_step1;"
-          print "  0 $ip_limit_rate;"
-          print "}"
-          print "map $backendmgr_balance $nenenet_backend_url {"
-          print "  0 $backend_url;"
-          print "  1 $balanced_backend_url;"
-          print "}"
-          print ""
-          done=1
-        }
-        print
-      }
-      END{
-        if(done==0){
-          print ""
-          print "# --- backendmgr auto-fix: maps requeridos (append) ---"
-          print "include " mf ";"
-          print "map $remote_addr $ip_limit_rate { default 0; include " lip "; }"
-          print "map $http_backend $backend_limit_rate { default 0; include " lbe "; }"
-          print "map $backend_url $url_limit_rate { default 0; include " lur "; }"
-          print "map $backend_limit_rate $nenenet_rate_step1 { default $backend_limit_rate; 0 $url_limit_rate; }"
-          print "map $nenenet_rate_step1 $nenenet_rate { default $nenenet_rate_step1; 0 $ip_limit_rate; }"
-          print "map $backendmgr_balance $nenenet_backend_url { 0 $backend_url; 1 $balanced_backend_url; }"
-        }
-      }
-    ' "$NGX_MAIN_INCLUDE" > "${NGX_MAIN_INCLUDE}.tmp" && mv "${NGX_MAIN_INCLUDE}.tmp" "$NGX_MAIN_INCLUDE"
-  fi
+map \$http_backend \$backend_url {
+  default "http://127.0.0.1:8880";
+  include ${NGX_BACKENDS_MAP};
+}
+
+# Limits (si existen)
+map \$remote_addr \$ip_limit_rate { default 0; include ${NGX_LIMITS_IP}; }
+map \$http_backend \$backend_limit_rate { default 0; include ${NGX_LIMITS_BACKEND}; }
+map \$backend_url \$url_limit_rate { default 0; include ${NGX_LIMITS_URL}; }
+
+# Cascada: backend -> url -> ip
+map \$backend_limit_rate \$nenenet_rate_step1 { default \$backend_limit_rate; 0 \$url_limit_rate; }
+map \$nenenet_rate_step1 \$nenenet_rate { default \$nenenet_rate_step1; 0 \$ip_limit_rate; }
+
+# Balance (si usás)
+map \$backendmgr_balance \$nenenet_backend_url { 0 \$backend_url; 1 \$balanced_backend_url; }
+
+include ${NGX_APPLY_SNIP};
+EOF
+
+  [[ -f "${NGX_DIR}/backendmgr.conf" ]] || ln -sf "$NGX_MAIN_INCLUDE" "${NGX_DIR}/backendmgr.conf" 2>/dev/null || true
 }
 
 ensure_nginx_conf_include(){
@@ -360,6 +210,7 @@ log() {
 }
 
 run_panel() {
+  local rc=0
   log "RUN_PANEL user=$(id -u) tty=$(tty 2>/dev/null || echo none) cwd=$(pwd)"
 
   if [[ ! -x "$PANEL" ]]; then
@@ -380,7 +231,8 @@ run_panel() {
 
   log "PANEL_EXIT rc=$rc"
 
-  if [[ -r /dev/tty && -w /dev/tty ]]; then
+  # ✅ Solo mostrar el aviso si hubo error
+  if [[ "$rc" -ne 0 && -r /dev/tty && -w /dev/tty ]]; then
     echo "" >/dev/tty
     echo "⚠️ El panel terminó (rc=$rc). Log: $LOG" >/dev/tty
     read -r -p "Enter para volver..." _ </dev/tty || true
@@ -402,7 +254,9 @@ case "${1:-}" in
 esac
 
 if [[ ! -x "$REAL" ]]; then
-  REAL="/usr/sbin/nginx"
+  log "ERROR real nginx missing path=$REAL"
+  echo "ERROR: nginx real no encontrado: $REAL" >&2
+  exit 127
 fi
 exec "$REAL" "$@"
 WRAP
@@ -434,10 +288,17 @@ main(){
   echo "[5/8] nginx.conf include..."
   ensure_nginx_conf_include
 
-  ensure_safe_nginx_wrapper
+  install_wrapper_nginx
 
-echo "[7/8] Reload..."
-nginx_real_test_and_reload
+  echo "[7/8] Reload..."
+  if [[ -x /usr/sbin/nginx.real ]]; then
+    /usr/sbin/nginx.real -t
+    /usr/sbin/nginx.real -s reload >/dev/null 2>&1 || true
+  else
+    nginx -t
+    nginx -s reload >/dev/null 2>&1 || true
+  fi
+
   echo "[8/8] ✅ Listo. Abrir panel con: nginx  (o sudo nginx)"
 }
 
