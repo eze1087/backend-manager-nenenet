@@ -34,7 +34,7 @@ NGX_LIMITS_URL="${NGX_DIR}/limits_url.map"
 # Logging snippet
 NGX_LOGGING_SNIP="${NGX_DIR}/logging.conf"
 
-# backups en /etc/nginx (misma ubicación)
+# backups en /etc/nginx (misma ubicaciÃ³n)
 BACKUP_DIR="/etc/nginx/backendmgr-backups"
 
 # Logs
@@ -78,15 +78,15 @@ BG_NONE='[49m'
 # ------------------ TTY + TRAPS ------------------
 mkdir -p /var/log 2>/dev/null || true
 
-# Forzar TTY para que SIEMPRE se vea el menú al llamar con nginx
+# Forzar TTY para que SIEMPRE se vea el menÃº al llamar con nginx
 if [[ -r /dev/tty && -w /dev/tty ]]; then
   exec </dev/tty >/dev/tty 2>&1
 fi
 
 on_err() {
   local rc=$?
-  echo "❌ ERROR: backendmgr rc=${rc} | línea ${LINENO} | cmd: ${BASH_COMMAND}" | tee -a "$PANEL_LOG" >/dev/null
-  echo -e "${YLW}📌 Log:${NC} ${PANEL_LOG}"
+  echo "âŒ ERROR: backendmgr rc=${rc} | lÃ­nea ${LINENO} | cmd: ${BASH_COMMAND}" | tee -a "$PANEL_LOG" >/dev/null
+  echo -e "${YLW}ðŸ“Œ Log:${NC} ${PANEL_LOG}"
   exit "$rc"
 }
 trap on_err ERR
@@ -100,16 +100,16 @@ if [[ "${BACKENDMGR_DEBUG:-0}" == "1" ]]; then
 fi
 
 # ------------------ HELPERS ------------------
-need_root() { [[ ${EUID:-999} -eq 0 ]] || { echo -e "${RED}ERROR:${NC} ejecutá: sudo nginx"; exit 1; }; }
+need_root() { [[ ${EUID:-999} -eq 0 ]] || { echo -e "${RED}ERROR:${NC} ejecutÃ¡: sudo nginx"; exit 1; }; }
 pause() { echo; read -r -p "Enter para volver..." _; }
 
 ensure_jq() {
   if command -v jq >/dev/null 2>&1; then return 0; fi
-  echo -e "${YLW}⚠️ Falta jq.${NC} Intento instalarlo..."
+  echo -e "${YLW}âš ï¸ Falta jq.${NC} Intento instalarlo..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y >/dev/null 2>&1 || true
   apt-get install -y jq >/dev/null 2>&1 || true
-  command -v jq >/dev/null 2>&1 || { echo -e "${RED}ERROR:${NC} no pude instalar jq. Hacé: apt install -y jq"; exit 1; }
+  command -v jq >/dev/null 2>&1 || { echo -e "${RED}ERROR:${NC} no pude instalar jq. HacÃ©: apt install -y jq"; exit 1; }
 }
 
 write_default_cfg() {
@@ -189,7 +189,7 @@ EOF
 }
 
 read_cfg() {
-  [[ -f "$CFG_FILE" ]] || { echo -e "${RED}Falta ${CFG_FILE}. Reinstalá con install.sh${NC}"; exit 1; }
+  [[ -f "$CFG_FILE" ]] || { echo -e "${RED}Falta ${CFG_FILE}. ReinstalÃ¡ con install.sh${NC}"; exit 1; }
 
   HEADER_NAME="$(jq -r '.header_name // "Backend"' "$CFG_FILE" 2>/dev/null || echo "Backend")"
   PRIMARY_DOMAIN="$(jq -r '.primary_domain // ""' "$CFG_FILE" 2>/dev/null || echo "")"
@@ -204,12 +204,12 @@ read_cfg() {
   WINDOW_SEC="$(jq -r '.traffic_window_seconds // 60' "$CFG_FILE" 2>/dev/null || echo "60")"
   STATS_LOG="$(jq -r '.stats_log_path // "/var/log/nginx/backendmgr.stats.log"' "$CFG_FILE" 2>/dev/null || echo "/var/log/nginx/backendmgr.stats.log")"
 
-  # ✅ Opción 11: logging
+  # âœ… OpciÃ³n 11: logging
   TRAFFIC_STATS_ENABLED="$(jq -r '.traffic_stats_enabled // true' "$CFG_FILE" 2>/dev/null || echo "true")"
   TRAFFIC_STATS_SINCE="$(jq -r '.traffic_stats_since // ""' "$CFG_FILE" 2>/dev/null || echo "")"
   [[ "$TRAFFIC_STATS_SINCE" == "null" ]] && TRAFFIC_STATS_SINCE=""
 
-  # ✅ Opción 11: escaneo permanente (scanner)
+  # âœ… OpciÃ³n 11: escaneo permanente (scanner)
   TRAFFIC_SCAN_ENABLED="$(jq -r '.traffic_scan_enabled // false' "$CFG_FILE" 2>/dev/null || echo "false")"
   TRAFFIC_SCAN_MODE="$(jq -r '.traffic_scan_mode // "backend"' "$CFG_FILE" 2>/dev/null || echo "backend")"
   TRAFFIC_SCAN_INTERVAL="$(jq -r '.traffic_scan_interval // "1min"' "$CFG_FILE" 2>/dev/null || echo "1min")"
@@ -224,7 +224,7 @@ read_cfg() {
 }
 
 
-# ---------- Helpers tráfico (banner / opción 11) ----------
+# ---------- Helpers trÃ¡fico (banner / opciÃ³n 11) ----------
 traffic_log_state_short() {
   # ON/OFF (+ desde)
   if [[ "${TRAFFIC_STATS_ENABLED:-false}" == "true" ]]; then
@@ -333,7 +333,7 @@ mem_used_line() {
     /^MemTotal:/ {t=$2}
     /^MemAvailable:/ {a=$2}
     END{
-      if(t<=0){print "🧠 RAM: ?"; exit}
+      if(t<=0){print "ðŸ§  RAM: ?"; exit}
       used=t-a; if(used<0) used=0
       used_mb=used/1024
       total_mb=t/1024
@@ -345,13 +345,13 @@ mem_used_line() {
       fpct=100-pct; if(fpct<0) fpct=0
       # Mostrar en MB si <1GB
       if(total_gb < 1.0){
-        printf "🧠 RAM: %.0f MB / %.0f MB (%d%%) | libre %.0f MB (%d%%)", used_mb, total_mb, pct, free_mb, fpct
+        printf "ðŸ§  RAM: %.0f MB / %.0f MB (%d%%) | libre %.0f MB (%d%%)", used_mb, total_mb, pct, free_mb, fpct
       } else if(used_gb < 1.0){
-        printf "🧠 RAM: %.0f MB / %.2f GB (%d%%) | libre %.2f GB (%d%%)", used_mb, total_gb, pct, free_gb, fpct
+        printf "ðŸ§  RAM: %.0f MB / %.2f GB (%d%%) | libre %.2f GB (%d%%)", used_mb, total_gb, pct, free_gb, fpct
       } else {
-        printf "🧠 RAM: %.2f GB / %.2f GB (%d%%) | libre %.2f GB (%d%%)", used_gb, total_gb, pct, free_gb, fpct
+        printf "ðŸ§  RAM: %.2f GB / %.2f GB (%d%%) | libre %.2f GB (%d%%)", used_gb, total_gb, pct, free_gb, fpct
       }
-    }' /proc/meminfo 2>/dev/null || echo "🧠 RAM: ?"
+    }' /proc/meminfo 2>/dev/null || echo "ðŸ§  RAM: ?"
 }
 
 cpu_usage_percent() {
@@ -386,16 +386,16 @@ cpu_line() {
   cores="$(nproc 2>/dev/null || echo 1)"
   load="$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || echo "0.00 0.00 0.00")"
   cpu_pct="$(cpu_usage_percent)"
-  echo "🧩 CPU: ${cores}c | uso ${cpu_pct}% | load ${load}"
+  echo "ðŸ§© CPU: ${cores}c | uso ${cpu_pct}% | load ${load}"
 }
 
 disk_usage_line() {
-  # Disco raíz (/)
+  # Disco raÃ­z (/)
   local used total avail pct fpct
   local line
   line="$(df -B1 / 2>/dev/null | awk 'NR==2{print $3,$2,$4,$5}' || true)"
   if [[ -z "$line" ]]; then
-    echo "💽 DISK: ?"
+    echo "ðŸ’½ DISK: ?"
     return 0
   fi
   read -r used total avail pct <<<"$line"
@@ -411,9 +411,9 @@ disk_usage_line() {
     used_h="$(numfmt --to=iec --suffix=B "$used" 2>/dev/null || echo "${used}B")"
     total_h="$(numfmt --to=iec --suffix=B "$total" 2>/dev/null || echo "${total}B")"
     avail_h="$(numfmt --to=iec --suffix=B "$avail" 2>/dev/null || echo "${avail}B")"
-    echo "💽 DISK: ${used_h} / ${total_h} (${pct}%) | libre ${avail_h} (${fpct}%)"
+    echo "ðŸ’½ DISK: ${used_h} / ${total_h} (${pct}%) | libre ${avail_h} (${fpct}%)"
   else
-    echo "💽 DISK: ${used}B / ${total}B (${pct}%) | libre ${avail}B (${fpct}%)"
+    echo "ðŸ’½ DISK: ${used}B / ${total}B (${pct}%) | libre ${avail}B (${fpct}%)"
   fi
 }
 
@@ -432,7 +432,7 @@ net_totals_line() {
     tx=$((tx + txb))
   done < <(tail -n +3 /proc/net/dev 2>/dev/null || true)
 
-  echo "📡 NET: ⬇️ $(human_bytes "$rx") | ⬆️ $(human_bytes "$tx") (desde boot)"
+  echo "ðŸ“¡ NET: â¬‡ï¸ $(human_bytes "$rx") | â¬†ï¸ $(human_bytes "$tx") (desde boot)"
 }
 
 
@@ -449,15 +449,15 @@ n=int(sys.argv[2])
 if len(s)<=n:
   print(s)
 else:
-  print(s[:max(0,n-1)]+"…")
+  print(s[:max(0,n-1)]+"â€¦")
 PY
   else
-    if ((${#s}>n)); then echo "${s:0:$((n-1))}…"; else echo "$s"; fi
+    if ((${#s}>n)); then echo "${s:0:$((n-1))}â€¦"; else echo "$s"; fi
   fi
 }
 
 server_ip_short() {
-  # intenta IP pública, si no, IP local principal
+  # intenta IP pÃºblica, si no, IP local principal
   local ip=""
   if command -v curl >/dev/null 2>&1; then
     ip="$(timeout 2s curl -fsSL https://api.ipify.org 2>/dev/null || true)"
@@ -473,7 +473,7 @@ server_ip_short() {
 }
 
 nginx_sched_banner_info() {
-  # Devuelve info breve de nginx reload/restart programado (sin "último")
+  # Devuelve info breve de nginx reload/restart programado (sin "Ãºltimo")
   local out=""
   local actions=("reload" "restart")
   local a
@@ -517,7 +517,7 @@ ramrefresh_last_line() {
     interval="$(grep -E '^OnUnitActiveSec=' "$timer_file" 2>/dev/null | head -n1 | cut -d= -f2- || true)"
   fi
 
-  # Estado real (y auto-heal si existe el timer file pero quedó disabled)
+  # Estado real (y auto-heal si existe el timer file pero quedÃ³ disabled)
   local is_on="OFF"
   if have_systemd; then
     systemctl daemon-reload >/dev/null 2>&1 || true
@@ -538,19 +538,19 @@ ramrefresh_last_line() {
 
   if [[ "$is_on" == "ON" ]]; then
     if [[ -n "$interval" ]]; then
-      echo "🧹 Refresco RAM: ON (cada ${interval}) | ${ngx_sched}"
+      echo "ðŸ§¹ Refresco RAM: ON (cada ${interval}) | ${ngx_sched}"
     else
-      echo "🧹 Refresco RAM: ON | ${ngx_sched}"
+      echo "ðŸ§¹ Refresco RAM: ON | ${ngx_sched}"
     fi
   else
-    echo "🧹 Refresco RAM: OFF | ${ngx_sched}"
+    echo "ðŸ§¹ Refresco RAM: OFF | ${ngx_sched}"
   fi
   return 0
 }
 
 
 
-# imprime una línea dentro del recuadro con ancho fijo (respetando emojis/ancho real)
+# imprime una lÃ­nea dentro del recuadro con ancho fijo (respetando emojis/ancho real)
 disp_width() {
   python3 -c 'import sys,wcwidth; s=sys.argv[1]; print(sum((w:=wcwidth.wcwidth(ch)) if w>0 else 0 for ch in s))' "$1" 2>/dev/null     || echo "${#1}"
 }
@@ -600,7 +600,7 @@ box_line_center() {
   local text="$*"
   local fitted
   fitted="$(disp_center_fit "$text" "$w")"
-  printf "║ %s ║
+  printf "â•‘ %s â•‘
 " "$fitted"
 }
 
@@ -610,7 +610,7 @@ box_line() {
   local text="$*"
   local fitted
   fitted="$(disp_fit "$text" "$w")"
-  printf "║ %s ║\n" "$fitted"
+  printf "â•‘ %s â•‘\n" "$fitted"
 }
 
 nginx_real_bin() {
@@ -626,12 +626,12 @@ nginx_test_reload() {
   local ngx
   ngx="$(nginx_real_bin)"
   if [[ -z "${ngx:-}" || ! -x "${ngx:-}" ]]; then
-    echo -e "${YLW}⚠️ nginx no está instalado.${NC}"
+    echo -e "${YLW}âš ï¸ nginx no estÃ¡ instalado.${NC}"
     return 0
   fi
 
   if ! timeout 10s "$ngx" -t >/dev/null 2>&1; then
-    echo -e "${YLW}⚠️ nginx -t falló. No recargo.${NC}"
+    echo -e "${YLW}âš ï¸ nginx -t fallÃ³. No recargo.${NC}"
     return 0
   fi
 
@@ -644,7 +644,7 @@ nginx_test_reload() {
   return 0
 }
 
-# ✅ Banner con ancho automático (para que el recuadro “quede bien” siempre)
+# âœ… Banner con ancho automÃ¡tico (para que el recuadro â€œquede bienâ€ siempre)
 banner() {
   clear || true
   read_cfg 2>/dev/null || true
@@ -664,45 +664,45 @@ banner() {
   traffic_s="$(traffic_log_state_short)"
   scan_s="$(traffic_scan_state_short)"
 
-  # Título
-  local title="🔥  BACKEND MANAGER • El NeNe Full 3.0 v${APP_VER}  🔥"
+  # TÃ­tulo
+  local title="ðŸ”¥  BACKEND MANAGER â€¢ El NeNe Full 3.0 v${APP_VER}  ðŸ”¥"
   local W=78
 
   printf "${BG_RED}${WHT}%s${NC}${BG_NONE}
 " "$(disp_center_fit "$title" "$W")"
   printf "${BG_DARK}${BCYA}%s${NC}${BG_NONE}
 " "$(printf "%-*s" "$W" "")"
-  printf "${BG_DARK}${WHT}  📅 FECHA: ${GRN}%-19s${WHT}   🌐 IP: ${GRN}%-15s${NC}${BG_NONE}
+  printf "${BG_DARK}${WHT}  ðŸ“… FECHA: ${GRN}%-19s${WHT}   ðŸŒ IP: ${GRN}%-15s${NC}${BG_NONE}
 " "$dt" "$ip"
   printf "${BG_DARK}${BCYA}%s${NC}${BG_NONE}
 " "$(printf "%-*s" "$W" "")"
 
   # Estado general (2 columnas)
   local ngx_label ngx_color
-  if [[ "$ng_state" == "ON" ]]; then ngx_label="✅ ACTIVO"; ngx_color="${BGRN}"; else ngx_label="❌ OFF"; ngx_color="${BRED}"; fi
+  if [[ "$ng_state" == "ON" ]]; then ngx_label="âœ… ACTIVO"; ngx_color="${BGRN}"; else ngx_label="âŒ OFF"; ngx_color="${BRED}"; fi
 
-  printf "${BG_DARK}  ⚙️  Nginx: ${ngx_color}%-10s${WHT}   📁 Dominios: ${GRN}%-3s${WHT}   🧱 Backends: ${GRN}%-3s${NC}${BG_NONE}
+  printf "${BG_DARK}  âš™ï¸  Nginx: ${ngx_color}%-10s${WHT}   ðŸ“ Dominios: ${GRN}%-3s${WHT}   ðŸ§± Backends: ${GRN}%-3s${NC}${BG_NONE}
 " "$ngx_label" "$dcount" "$bcount"
-  printf "${BG_DARK}  👑 Dominio madre: ${GRN}%-52s${NC}${BG_NONE}
+  printf "${BG_DARK}  ðŸ‘‘ Dominio madre: ${GRN}%-52s${NC}${BG_NONE}
 " "$(disp_trunc "$dom_active" 52)"
-  printf "${BG_DARK}  🏷️  Header: ${GRN}%-12s${WHT}   📈 Tráfico: ${GRN}%-12s${WHT}   🔎 Scanner: ${GRN}%-18s${NC}${BG_NONE}
+  printf "${BG_DARK}  ðŸ·ï¸  Header: ${GRN}%-12s${WHT}   ðŸ“ˆ TrÃ¡fico: ${GRN}%-12s${WHT}   ðŸ”Ž Scanner: ${GRN}%-18s${NC}${BG_NONE}
 " \
     "$(disp_trunc "$HEADER_NAME" 12)" "$(disp_trunc "$traffic_s" 12)" "$(disp_trunc "$scan_s" 18)"
-  printf "${BG_DARK}  💾 Backup: ${GRN}%-60s${NC}${BG_NONE}
+  printf "${BG_DARK}  ðŸ’¾ Backup: ${GRN}%-60s${NC}${BG_NONE}
 " "$(disp_trunc "$bkp" 60)"
 
   printf "${BG_DARK}${BCYA}%s${NC}${BG_NONE}
 " "$(printf "%-*s" "$W" "")"
 
-  # Recursos (líneas compactas)
+  # Recursos (lÃ­neas compactas)
   printf "${BG_DARK}  %s${NC}${BG_NONE}
-" "$(strip_ansi "$(disk_usage_line)" | sed 's/^💽 DISK: /💽 DISCO: /')"
+" "$(strip_ansi "$(disk_usage_line)" | sed 's/^ðŸ’½ DISK: /ðŸ’½ DISCO: /')"
   printf "${BG_DARK}  %s${NC}${BG_NONE}
-" "$(strip_ansi "$(mem_used_line)" | sed 's/^🧠 RAM: /🧠 RAM: /')"
+" "$(strip_ansi "$(mem_used_line)" | sed 's/^ðŸ§  RAM: /ðŸ§  RAM: /')"
   printf "${BG_DARK}  %s${NC}${BG_NONE}
 " "$(strip_ansi "$(cpu_line)")"
   printf "${BG_DARK}  %s${NC}${BG_NONE}
-" "$(strip_ansi "$(net_totals_line)" | sed 's/^📡 NET: /📡 RED: /')"
+" "$(strip_ansi "$(net_totals_line)" | sed 's/^ðŸ“¡ NET: /ðŸ“¡ RED: /')"
 
   # Timers
   printf "${BG_DARK}  %s${NC}${BG_NONE}
@@ -720,7 +720,7 @@ validate_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 validate_rate() { [[ "$1" == "0" || "$1" =~ ^[0-9]+[kKmM]$ ]]; }
 
 # ------------------ BALANCER LEGACY (se deja OFF) ------------------
-# (Solo para que no falle nada que lo llame; tu balance real está en "mothers_menu")
+# (Solo para que no falle nada que lo llame; tu balance real estÃ¡ en "mothers_menu")
 rebuild_balancer_files() {
   cat > "$NGX_BALANCER_CONF" <<'EOF'
 # backendmgr balancer.conf (legacy balance OFF)
@@ -782,7 +782,7 @@ write_apply_conf() {
 # ${APP_NAME} apply.conf
 EOF
 
-  # ✅ activar/desactivar logging de tráfico (opción 11)
+  # âœ… activar/desactivar logging de trÃ¡fico (opciÃ³n 11)
   if [[ "${TRAFFIC_STATS_ENABLED}" == "true" ]]; then
     cat >> "$NGX_APPLY_SNIP" <<EOF
 access_log ${STATS_LOG} backendmgr_stats;
@@ -816,7 +816,7 @@ limit_rate $nenenet_rate;
 EOF
 }
 
-# ✅ toggles para logging (opción 11)
+# âœ… toggles para logging (opciÃ³n 11)
 set_traffic_stats_enabled() {
   local new="$1" # true/false
   local since=""
@@ -835,7 +835,7 @@ set_traffic_stats_enabled() {
   return 0
 }
 
-# ------------------ TRÁFICO: ESCANEO PERMANENTE (scanner) ------------------
+# ------------------ TRÃFICO: ESCANEO PERMANENTE (scanner) ------------------
 have_systemd() { command -v systemctl >/dev/null 2>&1; }
 
 systemd_write_unit() {
@@ -915,7 +915,7 @@ fi
 # tail -c +N empieza en N (1-index)
 start=$((offset_old + 1))
 
-# Elegir DB según modo
+# Elegir DB segÃºn modo
 DB="$DB_BE"
 KEYFIELD=4
 if [[ "$MODE" == "ip" ]]; then
@@ -928,13 +928,13 @@ fi
 
 # Procesar incremental:
 # - Primero cargar DB existente (key bytes req)
-# - Luego sumar nuevas líneas del log
+# - Luego sumar nuevas lÃ­neas del log
 # - Guardar DB actualizado
 tmp="${DB}.tmp.$$"
 
 # Nota: log format:
 # time|remote_addr|host|http_backend|upstream_addr|status|body_bytes_sent|...
-# awk de verdad (dos pasadas: DB + nuevas líneas)
+# awk de verdad (dos pasadas: DB + nuevas lÃ­neas)
 tail -c +"$start" "$STATS_LOG" 2>/dev/null | awk -F'|' -v keyf="$KEYFIELD" -v DBFILE="$DB" '
   BEGIN { OFS="\t" }
   FNR==NR {
@@ -946,10 +946,10 @@ tail -c +"$start" "$STATS_LOG" 2>/dev/null | awk -F'|' -v keyf="$KEYFIELD" -v DB
   }
   {
     k=$keyf
-    if(k=="") k="(vacío)"
+    if(k=="") k="(vacÃ­o)"
     bytes=$7
     if(bytes=="") bytes=0
-    # bytes viene numérico
+    # bytes viene numÃ©rico
     r[k]+=1
     b[k]+=bytes
   }
@@ -974,12 +974,12 @@ BASH
   chmod 755 "$helper" || true
 }
 
-# ------------------ TRÁFICO: limpiar historial/resumen (scanner) ------------------
+# ------------------ TRÃFICO: limpiar historial/resumen (scanner) ------------------
 traffic_scan_clear_history() {
-  echo -e "${CYA}🧹 Borrar historial acumulado del scanner${NC}"
+  echo -e "${CYA}ðŸ§¹ Borrar historial acumulado del scanner${NC}"
   echo -e "${DIM}Esto borra los totales guardados y el estado incremental. No toca nginx.conf ni backends.${NC}"
   echo
-  echo "Se eliminarán (si existen):"
+  echo "Se eliminarÃ¡n (si existen):"
   echo "  - /var/lib/backendmgr/traffic_totals_ip.db"
   echo "  - /var/lib/backendmgr/traffic_totals_backend.db"
   echo "  - /var/lib/backendmgr/traffic_scan.state"
@@ -987,7 +987,7 @@ traffic_scan_clear_history() {
   echo
   read -r -p "Confirmar (s/N): " yn
   case "${yn,,}" in
-    s|si|sí|y|yes) ;;
+    s|si|sÃ­|y|yes) ;;
     *) echo -e "${YLW}Cancelado.${NC}"; return 0 ;;
   esac
 
@@ -996,12 +996,12 @@ traffic_scan_clear_history() {
         /var/lib/backendmgr/traffic_scan.state \
         /var/lib/backendmgr/traffic_last_run 2>/dev/null || true
 
-  # recrear archivos vacíos para evitar mensajes raros
+  # recrear archivos vacÃ­os para evitar mensajes raros
   mkdir -p /var/lib/backendmgr 2>/dev/null || true
   : > /var/lib/backendmgr/traffic_totals_ip.db 2>/dev/null || true
   : > /var/lib/backendmgr/traffic_totals_backend.db 2>/dev/null || true
 
-  echo -e "${GRN}✅ Historial del scanner borrado.${NC}"
+  echo -e "${GRN}âœ… Historial del scanner borrado.${NC}"
   return 0
 }
 
@@ -1064,7 +1064,7 @@ traffic_scan_install_or_update_units() {
   [[ -n "${every:-}" ]] || every="1min"
 
   if ! have_systemd; then
-    echo -e "${YLW}⚠️ No hay systemd/systemctl. No puedo programar el scanner permanente.${NC}"
+    echo -e "${YLW}âš ï¸ No hay systemd/systemctl. No puedo programar el scanner permanente.${NC}"
     return 0
   fi
 
@@ -1080,13 +1080,13 @@ traffic_scan_install_or_update_units() {
   systemd_reload_daemon
   systemd_enable_start_timer "backendmgr-traffic-scan.timer"
 
-  echo -e "${GRN}✅ Scanner activado:${NC} modo=${mode}, cada ${every}"
+  echo -e "${GRN}âœ… Scanner activado:${NC} modo=${mode}, cada ${every}"
   return 0
 }
 
 traffic_scan_disable_units() {
   if ! have_systemd; then
-    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    echo -e "${YLW}âš ï¸ No hay systemd/systemctl.${NC}"
     return 0
   fi
 
@@ -1098,7 +1098,7 @@ traffic_scan_disable_units() {
     .traffic_scan_enabled = false
   ' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
 
-  echo -e "${GRN}✅ Scanner desactivado.${NC}"
+  echo -e "${GRN}âœ… Scanner desactivado.${NC}"
   return 0
 }
 
@@ -1108,7 +1108,7 @@ traffic_scan_run_now() {
   [[ "$mode" == "backend" || "$mode" == "ip" ]] || mode="backend"
 
   read_cfg
-  [[ -f "$STATS_LOG" ]] || { echo -e "${YLW}No existe todavía: ${STATS_LOG}${NC}"; return 0; }
+  [[ -f "$STATS_LOG" ]] || { echo -e "${YLW}No existe todavÃ­a: ${STATS_LOG}${NC}"; return 0; }
 
   local state_dir="${STATE_DIR:-/var/lib/backendmgr}"
   mkdir -p "$state_dir" 2>/dev/null || true
@@ -1139,10 +1139,10 @@ traffic_scan_run_now() {
       BEGIN{ cr=sprintf("%c",13) }
       NF>=7{
         k=$4
-        if(k=="") k="(vacío)"
+        if(k=="") k="(vacÃ­o)"
         gsub(cr,"",k)
         sub(/^[[:space:]]+/,"",k); sub(/[[:space:]]+$/,"",k)
-        if(k=="") k="(vacío)"
+        if(k=="") k="(vacÃ­o)"
         bytes=$7+0
         req[k]+=1; b[k]+=bytes
       }
@@ -1159,14 +1159,14 @@ traffic_scan_enable() {
   local mode="$1" interval="$2"
 
   if ! have_systemd; then
-    echo -e "${YLW}⚠️ No hay systemd/systemctl. No puedo dejarlo permanente en este sistema.${NC}"
+    echo -e "${YLW}âš ï¸ No hay systemd/systemctl. No puedo dejarlo permanente en este sistema.${NC}"
     return 0
   fi
 
-  # ✅ requisito: el access_log debe estar ACTIVADO para que exista tráfico que escanear
+  # âœ… requisito: el access_log debe estar ACTIVADO para que exista trÃ¡fico que escanear
   read_cfg
   if [[ "${TRAFFIC_STATS_ENABLED}" != "true" ]]; then
-    echo -e "${YLW}⚠️ El logging de tráfico estaba DESACTIVADO. Lo activo automáticamente.${NC}"
+    echo -e "${YLW}âš ï¸ El logging de trÃ¡fico estaba DESACTIVADO. Lo activo automÃ¡ticamente.${NC}"
     set_traffic_stats_enabled true
   fi
 
@@ -1184,14 +1184,14 @@ traffic_scan_enable() {
   systemd_reload_daemon
   systemd_enable_start_timer "backendmgr-traffic-scan.timer"
 
-  echo -e "${GRN}✅ Scan permanente activado:${NC} modo=${mode} cada ${interval}"
+  echo -e "${GRN}âœ… Scan permanente activado:${NC} modo=${mode} cada ${interval}"
   echo -e "${DIM}Va acumulando totales en /var/lib/backendmgr/traffic.scan.*.db${NC}"
   return 0
 }
 
 traffic_scan_disable() {
   if ! have_systemd; then
-    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    echo -e "${YLW}âš ï¸ No hay systemd/systemctl.${NC}"
     return 0
   fi
 
@@ -1201,7 +1201,7 @@ traffic_scan_disable() {
   rm -f /etc/systemd/system/backendmgr-traffic-scan.timer /etc/systemd/system/backendmgr-traffic-scan.service 2>/dev/null || true
   systemd_reload_daemon
 
-  echo -e "${GRN}✅ Escaneo permanente DESACTIVADO.${NC}"
+  echo -e "${GRN}âœ… Escaneo permanente DESACTIVADO.${NC}"
   return 0
 }
 
@@ -1233,7 +1233,7 @@ traffic_show_from_db() {
     db="/var/lib/backendmgr/traffic_totals_ip.db"
   fi
 
-  [[ -f "$db" ]] || { echo -e "${YLW}No hay resumen todavía (db vacío). Esperá 1 ciclo del scanner.${NC}"; return 0; }
+  [[ -f "$db" ]] || { echo -e "${YLW}No hay resumen todavÃ­a (db vacÃ­o). EsperÃ¡ 1 ciclo del scanner.${NC}"; return 0; }
 
   # Mapa backend -> ip:port (desde backends.map)
   local map_tmp=""
@@ -1297,24 +1297,24 @@ traffic_show_from_db() {
 
 traffic_scan_menu() {
   read_cfg
-  echo -e "${CYA}Escaneo permanente de tráfico (scanner)${NC}"
-  echo -e "${DIM}Este modo deja “siempre escaneado” el tráfico, actualizando un resumen en /var/lib/backendmgr.${NC}\n"
+  echo -e "${CYA}Escaneo permanente de trÃ¡fico (scanner)${NC}"
+  echo -e "${DIM}Este modo deja â€œsiempre escaneadoâ€ el trÃ¡fico, actualizando un resumen en /var/lib/backendmgr.${NC}\n"
   echo "1) Activar / Cambiar (modo + intervalo)"
   echo "2) Desactivar"
   echo "3) Ver estado"
   echo "0) Volver"
-  read -r -p "Opción: " op
+  read -r -p "OpciÃ³n: " op
   echo
   case "$op" in
     1)
       if ! have_systemd; then
-        echo -e "${YLW}⚠️ Requiere systemd/systemctl (Ubuntu normal sí lo tiene).${NC}"
+        echo -e "${YLW}âš ï¸ Requiere systemd/systemctl (Ubuntu normal sÃ­ lo tiene).${NC}"
         return 0
       fi
       echo "Modo:"
       echo " 1) backend (recomendada)  -> acumula por header ${HEADER_NAME}"
       echo " 2) ip                    -> acumula por IP"
-      read -r -p "Elegí modo (1/2): " mo
+      read -r -p "ElegÃ­ modo (1/2): " mo
       local mode="backend"
       [[ "$mo" == "2" ]] && mode="ip"
       echo
@@ -1326,7 +1326,7 @@ traffic_scan_menu() {
     2) traffic_scan_disable ;;
     3) traffic_scan_status ;;
     0) return 0 ;;
-    *) echo -e "${YLW}Opción inválida.${NC}" ;;
+    *) echo -e "${YLW}OpciÃ³n invÃ¡lida.${NC}" ;;
   esac
   return 0
 }
@@ -1407,7 +1407,7 @@ rebuild_mothers_upstreams() {
   nginx_test_reload
 }
 
-# ✅ Solo agrega el include de mothers upstreams (sin pisar backendmgr.conf)
+# âœ… Solo agrega el include de mothers upstreams (sin pisar backendmgr.conf)
 ensure_mothers_include() {
   [[ -f "$NGX_MAIN_INCLUDE" ]] || return 0
   if ! grep -qF "$NGX_MOTHERS_UPSTREAMS" "$NGX_MAIN_INCLUDE" 2>/dev/null; then
@@ -1435,9 +1435,9 @@ mothers_add() {
   echo -e "${CYA}Agregar madre al pool de:${NC} ${dom}"
   echo -e "${DIM}Formato: IP y puerto (ej 10.0.0.2 : 80).${NC}\n"
   read -r -p "IP de la madre: " ip
-  validate_ip "$ip" || { echo -e "${RED}IP inválida.${NC}"; return 0; }
+  validate_ip "$ip" || { echo -e "${RED}IP invÃ¡lida.${NC}"; return 0; }
   read -r -p "Puerto (ej 80): " port
-  [[ "$port" =~ ^[0-9]{2,5}$ ]] || { echo -e "${RED}Puerto inválido.${NC}"; return 0; }
+  [[ "$port" =~ ^[0-9]{2,5}$ ]] || { echo -e "${RED}Puerto invÃ¡lido.${NC}"; return 0; }
 
   local entry="${ip}:${port}"
 
@@ -1448,7 +1448,7 @@ mothers_add() {
 
   echo "$entry" >> "$lf"
   rebuild_mothers_upstreams
-  echo -e "${GRN}✅ Madre agregada:${NC} $entry"
+  echo -e "${GRN}âœ… Madre agregada:${NC} $entry"
 }
 
 mothers_remove() {
@@ -1460,8 +1460,8 @@ mothers_remove() {
   echo -e "${CYA}Quitar madre de:${NC} ${dom}\n"
   nl -w2 -s') ' "$lf"
   echo
-  read -r -p "Número: " n
-  [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${RED}Inválido.${NC}"; return 0; }
+  read -r -p "NÃºmero: " n
+  [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${RED}InvÃ¡lido.${NC}"; return 0; }
 
   local line
   line="$(sed -n "${n}p" "$lf" 2>/dev/null || true)"
@@ -1469,7 +1469,7 @@ mothers_remove() {
 
   awk -v rm="$line" '$0!=rm{print}' "$lf" > "${lf}.tmp" && mv "${lf}.tmp" "$lf"
   rebuild_mothers_upstreams
-  echo -e "${GRN}✅ Madre eliminada:${NC} $line"
+  echo -e "${GRN}âœ… Madre eliminada:${NC} $line"
 }
 
 mothers_set_mode() {
@@ -1482,7 +1482,7 @@ mothers_set_mode() {
   echo "2) least_conn (menos conexiones)"
   echo "3) ip_hash (sticky por IP)"
   echo "4) failover (primario/secundario)"
-  read -r -p "Opción: " op
+  read -r -p "OpciÃ³n: " op
 
   local mode="round_robin"
   case "$op" in
@@ -1490,7 +1490,7 @@ mothers_set_mode() {
     2) mode="least_conn" ;;
     3) mode="ip_hash" ;;
     4) mode="failover" ;;
-    *) echo -e "${YLW}Inválido.${NC}"; return 0 ;;
+    *) echo -e "${YLW}InvÃ¡lido.${NC}"; return 0 ;;
   esac
 
   echo "$mode" > "$(mother_mode_file "$dom")"
@@ -1505,7 +1505,7 @@ mothers_set_mode() {
   fi
 
   rebuild_mothers_upstreams
-  echo -e "${GRN}✅ Modo guardado:${NC} $mode"
+  echo -e "${GRN}âœ… Modo guardado:${NC} $mode"
 }
 
 mothers_enable_disable() {
@@ -1516,27 +1516,27 @@ mothers_enable_disable() {
   echo -e "${CYA}Balanceo entre madres para:${NC} ${dom}\n"
   echo "1) Activar (proxy_pass -> upstream mothers)"
   echo "2) Desactivar (proxy_pass -> backend directo por header)"
-  read -r -p "Opción: " op
+  read -r -p "OpciÃ³n: " op
 
   case "$op" in
     1)
       mothers_enable_for_domain "$dom"
       rebuild_mothers_upstreams
       nginx_test_reload
-      echo -e "${GRN}✅ Activado.${NC}"
+      echo -e "${GRN}âœ… Activado.${NC}"
       ;;
     2)
       mothers_disable_for_domain "$dom"
       nginx_test_reload
-      echo -e "${GRN}✅ Desactivado.${NC}"
+      echo -e "${GRN}âœ… Desactivado.${NC}"
       ;;
-    *) echo -e "${YLW}Inválido.${NC}" ;;
+    *) echo -e "${YLW}InvÃ¡lido.${NC}" ;;
   esac
 }
 
 mothers_menu() {
-  echo -e "${CYA}⚖️ Balanceo de Madres (Pool por dominio)${NC}"
-  echo -e "${DIM}Reparte requests entre SERVIDORES MADRE (VPS) que tienen el mismo map backend→IP.${NC}\n"
+  echo -e "${CYA}âš–ï¸ Balanceo de Madres (Pool por dominio)${NC}"
+  echo -e "${DIM}Reparte requests entre SERVIDORES MADRE (VPS) que tienen el mismo map backendâ†’IP.${NC}\n"
   echo "1) Ver madres de un dominio"
   echo "2) Agregar madre a un dominio"
   echo "3) Quitar madre de un dominio"
@@ -1544,7 +1544,7 @@ mothers_menu() {
   echo "5) Activar / Desactivar balanceo por dominio"
   echo "0) Volver"
   echo
-  read -r -p "Opción: " op
+  read -r -p "OpciÃ³n: " op
   echo
   case "$op" in
     1) pick_domain_for_manage && mothers_list "$PICKED_DOMAIN" ;;
@@ -1553,7 +1553,7 @@ mothers_menu() {
     4) mothers_set_mode ;;
     5) mothers_enable_disable ;;
     0) return 0 ;;
-    *) echo -e "${YLW}Opción inválida.${NC}" ;;
+    *) echo -e "${YLW}OpciÃ³n invÃ¡lida.${NC}" ;;
   esac
   return 0
 }
@@ -1574,35 +1574,35 @@ map_set_line() {
 
 speed_limit_menu() {
   echo -e "${CYA}Limitar ancho de banda (limit_rate)${NC}"
-  echo -e "${DIM}Formato: 512k, 2m, 10m. 0 = sin límite.${NC}\n"
+  echo -e "${DIM}Formato: 512k, 2m, 10m. 0 = sin lÃ­mite.${NC}\n"
   echo "1) Limitar por IP"
   echo "2) Limitar por Backend"
-  echo "3) Limpiar límites (IP y Backend)"
-  read -r -p "Opción: " op
+  echo "3) Limpiar lÃ­mites (IP y Backend)"
+  read -r -p "OpciÃ³n: " op
   echo
   case "$op" in
     1)
       read -r -p "IP: " ip
-      validate_ip "$ip" || { echo -e "${RED}IP inválida.${NC}"; return 0; }
+      validate_ip "$ip" || { echo -e "${RED}IP invÃ¡lida.${NC}"; return 0; }
       read -r -p "Velocidad (ej 2m, 512k, 0=unlimited): " rate
-      validate_rate "$rate" || { echo -e "${RED}Rate inválido.${NC}"; return 0; }
+      validate_rate "$rate" || { echo -e "${RED}Rate invÃ¡lido.${NC}"; return 0; }
       map_set_line "$NGX_LIMITS_IP" "$ip" "$rate" "noquote"
       ensure_http_conf_maps
       write_apply_conf
       nginx_test_reload
-      echo -e "${GRN}✅ OK.${NC}"
+      echo -e "${GRN}âœ… OK.${NC}"
       return 0
       ;;
     2)
       read -r -p "Backend (ej svpnene38): " key
-      validate_key "$key" || { echo -e "${RED}Backend inválido.${NC}"; return 0; }
+      validate_key "$key" || { echo -e "${RED}Backend invÃ¡lido.${NC}"; return 0; }
       read -r -p "Velocidad (ej 2m, 512k, 0=unlimited): " rate
-      validate_rate "$rate" || { echo -e "${RED}Rate inválido.${NC}"; return 0; }
+      validate_rate "$rate" || { echo -e "${RED}Rate invÃ¡lido.${NC}"; return 0; }
       map_set_line "$NGX_LIMITS_BACKEND" "$key" "$rate" "quote"
       ensure_http_conf_maps
       write_apply_conf
       nginx_test_reload
-      echo -e "${GRN}✅ OK.${NC}"
+      echo -e "${GRN}âœ… OK.${NC}"
       return 0
       ;;
     3)
@@ -1611,10 +1611,10 @@ speed_limit_menu() {
       ensure_http_conf_maps
       write_apply_conf
       nginx_test_reload
-      echo -e "${GRN}✅ Límites limpiados.${NC}"
+      echo -e "${GRN}âœ… LÃ­mites limpiados.${NC}"
       return 0
       ;;
-    *) echo "Opción inválida"; return 0 ;;
+    *) echo "OpciÃ³n invÃ¡lida"; return 0 ;;
   esac
 }
 
@@ -1630,7 +1630,7 @@ pick_domain() {
     printf "%-3s) %s\n" "$i" "$dom"
   done
   echo
-  read -r -p "Número: " n
+  read -r -p "NÃºmero: " n
   [[ "$n" =~ ^[0-9]+$ ]] || return 1
   (( n>=1 && n<=${#files[@]} )) || return 1
   PICKED_DOMAIN_FILE="${files[$((n-1))]}"
@@ -1652,7 +1652,7 @@ pick_backend() {
     printf "%-3s) %-20s -> %s:%s\n" "$i" "$key" "$ip" "$port"
   done
   echo
-  read -r -p "Número: " n
+  read -r -p "NÃºmero: " n
   [[ "$n" =~ ^[0-9]+$ ]] || return 1
   (( n>=1 && n<=${#lines[@]} )) || return 1
   line="${lines[$((n-1))]}"
@@ -1708,7 +1708,7 @@ add_domain_auto_create() {
   echo -e "${CYA}Agregar dominio madre (AUTO crea server)${NC}"
   echo -e "${DIM}Ejemplo: cpu2.nenenet.site${NC}\n"
   read -r -p "Dominio madre nuevo: " dom
-  validate_domain "$dom" || { echo -e "${RED}Dominio inválido.${NC}"; return 0; }
+  validate_domain "$dom" || { echo -e "${RED}Dominio invÃ¡lido.${NC}"; return 0; }
 
   create_server_for_domain "$dom" "300s" "600s" "600s"
 
@@ -1726,7 +1726,7 @@ add_domain_auto_create() {
   rebuild_balancer_files
   ensure_domain_target_exists "$dom"
   nginx_test_reload
-  echo -e "${GRN}✅ Dominio madre creado:${NC} ${dom} (80)"
+  echo -e "${GRN}âœ… Dominio madre creado:${NC} ${dom} (80)"
   return 0
 }
 
@@ -1735,7 +1735,7 @@ create_or_edit_server_http() {
   echo -e "${DIM}Enter = default 300/600/600.${NC}\n"
 
   read -r -p "Dominio (ej: cpu2.elnene.site): " dom
-  validate_domain "$dom" || { echo -e "${RED}Dominio inválido.${NC}"; return 0; }
+  validate_domain "$dom" || { echo -e "${RED}Dominio invÃ¡lido.${NC}"; return 0; }
 
   read -r -p "proxy_connect_timeout (Enter=300s): " cto
   read -r -p "proxy_send_timeout    (Enter=600s): " sto
@@ -1749,7 +1749,7 @@ create_or_edit_server_http() {
   rebuild_balancer_files
   ensure_domain_target_exists "$dom"
   nginx_test_reload
-  echo -e "${GRN}✅ Actualizado:${NC} ${dom}"
+  echo -e "${GRN}âœ… Actualizado:${NC} ${dom}"
   return 0
 }
 
@@ -1767,7 +1767,7 @@ list_domains() {
   return 0
 }
 
-# ---- gestión de dominios madre (editar/eliminar) ----
+# ---- gestiÃ³n de dominios madre (editar/eliminar) ----
 pick_domain_for_manage() {
   mapfile -t files < <(server_files)
   [[ "${#files[@]}" -gt 0 ]] || { echo -e "${YLW}No hay dominios madre creados.${NC}"; return 1; }
@@ -1780,7 +1780,7 @@ pick_domain_for_manage() {
     printf "%-3s) %s\n" "$i" "$dom"
   done
   echo
-  read -r -p "Número: " n
+  read -r -p "NÃºmero: " n
   [[ "$n" =~ ^[0-9]+$ ]] || return 1
   (( n>=1 && n<=${#files[@]} )) || return 1
 
@@ -1792,7 +1792,7 @@ pick_domain_for_manage() {
 
 edit_domain_pick() {
   echo -e "${CYA}Editar dominio madre (timeouts)${NC}"
-  echo -e "${DIM}Elegís un dominio de la lista. Enter = default 300/600/600.${NC}\n"
+  echo -e "${DIM}ElegÃ­s un dominio de la lista. Enter = default 300/600/600.${NC}\n"
 
   pick_domain_for_manage || return 0
 
@@ -1810,7 +1810,7 @@ edit_domain_pick() {
   ensure_domain_target_exists "$PICKED_DOMAIN"
   nginx_test_reload
 
-  echo -e "${GRN}✅ Dominio actualizado:${NC} ${PICKED_DOMAIN}"
+  echo -e "${GRN}âœ… Dominio actualizado:${NC} ${PICKED_DOMAIN}"
   return 0
 }
 
@@ -1823,11 +1823,11 @@ delete_domain_pick() {
   echo -e "${YLW}Vas a eliminar:${NC} ${PICKED_DOMAIN}"
   read -r -p "Confirmar (s/N): " yn
   case "${yn,,}" in
-    s|si|sí|y|yes) ;;
+    s|si|sÃ­|y|yes) ;;
     *) echo -e "${YLW}Cancelado.${NC}"; return 0 ;;
   esac
 
-  # Si eliminás el dominio que está como primary_domain, lo limpiamos del config
+  # Si eliminÃ¡s el dominio que estÃ¡ como primary_domain, lo limpiamos del config
   if [[ -f "$CFG_FILE" ]]; then
     if [[ "$(jq -r '.primary_domain // ""' "$CFG_FILE" 2>/dev/null || echo "")" == "$PICKED_DOMAIN" ]]; then
       jq '.primary_domain = ""' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
@@ -1846,20 +1846,20 @@ delete_domain_pick() {
   rebuild_balancer_files
   nginx_test_reload
 
-  echo -e "${GRN}✅ Dominio eliminado:${NC} ${PICKED_DOMAIN}"
+  echo -e "${GRN}âœ… Dominio eliminado:${NC} ${PICKED_DOMAIN}"
   return 0
 }
 
 domains_menu() {
   while true; do
     echo -e "${CYA}Dominios madre${NC}"
-    echo " 1) ➕ Agregar dominio madre (AUTO crea server)"
-    echo " 2) ✏️  Editar dominio madre (elegir de lista)"
-    echo " 3) 🗑️  Eliminar dominio madre (elegir de lista)"
-    echo " 4) 📃 Listar dominios madre"
+    echo " 1) âž• Agregar dominio madre (AUTO crea server)"
+    echo " 2) âœï¸  Editar dominio madre (elegir de lista)"
+    echo " 3) ðŸ—‘ï¸  Eliminar dominio madre (elegir de lista)"
+    echo " 4) ðŸ“ƒ Listar dominios madre"
     echo " 0) Volver"
     echo
-    read -r -p "Opción: " op
+    read -r -p "OpciÃ³n: " op
     echo
     case "$op" in
       1) add_domain_auto_create; pause ;;
@@ -1867,14 +1867,14 @@ domains_menu() {
       3) delete_domain_pick; pause ;;
       4) list_domains; pause ;;
       0) return 0 ;;
-      *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
+      *) echo -e "${YLW}OpciÃ³n invÃ¡lida.${NC}"; pause ;;
     esac
   done
 }
 
 # ------------------ BACKENDS ------------------
 
-# ------------------ META BACKENDS (creación / expiración) ------------------
+# ------------------ META BACKENDS (creaciÃ³n / expiraciÃ³n) ------------------
 # Formato: key|ip|port|created_epoch|expires_epoch(0=sin vencimiento)
 backend_meta_normalize() {
   [[ -f "$BACKEND_META_FILE" ]] || return 0
@@ -1915,7 +1915,7 @@ backend_fmt_date() {
 
 backend_delete_by_key() {
   local key="$1"
-  # busca línea exacta por key en backends.map y la elimina
+  # busca lÃ­nea exacta por key en backends.map y la elimina
   local line
   line="$(backend_lines | awk -v k="$key" '{
       match($0, /^[ \t]*"([^"]+)"/, m);
@@ -1946,10 +1946,10 @@ add_backend_core() {
         if($0~re){ sub(/\"http:\\/\\/[^\\\"]+\"/, "\""url"\"") }
         print
       }' "$NGX_BACKENDS_MAP" > "${NGX_BACKENDS_MAP}.tmp" && mv "${NGX_BACKENDS_MAP}.tmp" "$NGX_BACKENDS_MAP"
-    echo -e "${GRN}✅ Actualizado:${NC} $key -> $ip:$port"
+    echo -e "${GRN}âœ… Actualizado:${NC} $key -> $ip:$port"
   else
     printf "        \"%s\" \"%s\";\n" "$key" "$url" >> "$NGX_BACKENDS_MAP"
-    echo -e "${GRN}✅ Agregado:${NC} $key -> $ip:$port"
+    echo -e "${GRN}âœ… Agregado:${NC} $key -> $ip:$port"
   fi
 
   rebuild_balancer_files
@@ -1961,21 +1961,21 @@ add_backend_core() {
 }
 
 backend_add_with_days() {
-  echo -e "${CYA}Nuevo backend (con vencimiento en días)${NC}"
-  echo -e "${DIM}Ejemplo: elnene51 -> 38.242.152.147:80 (30 días)${NC}\n"
+  echo -e "${CYA}Nuevo backend (con vencimiento en dÃ­as)${NC}"
+  echo -e "${DIM}Ejemplo: elnene51 -> 38.242.152.147:80 (30 dÃ­as)${NC}\n"
 
   read -r -p "Nombre del backend (ej: elnene51): " key
-  validate_key "$key" || { echo -e "${RED}Nombre inválido.${NC}"; return 0; }
+  validate_key "$key" || { echo -e "${RED}Nombre invÃ¡lido.${NC}"; return 0; }
 
   read -r -p "IP (ej: 179.43.112.38): " ip
-  validate_ip "$ip" || { echo -e "${RED}IP inválida.${NC}"; return 0; }
+  validate_ip "$ip" || { echo -e "${RED}IP invÃ¡lida.${NC}"; return 0; }
 
   read -r -p "Puerto (ej: 80): " port
-  [[ "$port" =~ ^[0-9]{2,5}$ ]] || { echo -e "${RED}Puerto inválido.${NC}"; return 0; }
+  [[ "$port" =~ ^[0-9]{2,5}$ ]] || { echo -e "${RED}Puerto invÃ¡lido.${NC}"; return 0; }
 
-  read -r -p "Cantidad de días activo (ej: 30): " days
-  [[ "$days" =~ ^[0-9]+$ ]] || { echo -e "${RED}Días inválidos.${NC}"; return 0; }
-  (( days>=1 && days<=3650 )) || { echo -e "${RED}Días fuera de rango.${NC}"; return 0; }
+  read -r -p "Cantidad de dÃ­as activo (ej: 30): " days
+  [[ "$days" =~ ^[0-9]+$ ]] || { echo -e "${RED}DÃ­as invÃ¡lidos.${NC}"; return 0; }
+  (( days>=1 && days<=3650 )) || { echo -e "${RED}DÃ­as fuera de rango.${NC}"; return 0; }
 
   add_backend_core "$key" "$ip" "$port" || return 0
 
@@ -1993,7 +1993,7 @@ backend_add_with_days() {
   exp="$((now + days*86400))"
   backend_meta_upsert "$key" "$ip" "$port" "$created_old" "$exp"
 
-  echo -e "${GRN}📅 Vence:${NC} $(backend_fmt_date "$exp")"
+  echo -e "${GRN}ðŸ“… Vence:${NC} $(backend_fmt_date "$exp")"
   return 0
 }
 
@@ -2025,7 +2025,7 @@ backend_list_with_dates() {
 }
 
 backend_add_days_menu() {
-  echo -e "${CYA}Agregar días a un backend${NC}\n"
+  echo -e "${CYA}Agregar dÃ­as a un backend${NC}\n"
   mapfile -t lines < <(backend_lines)
   [[ "${#lines[@]}" -gt 0 ]] || { echo -e "${YLW}No hay backends.${NC}"; return 0; }
 
@@ -2039,8 +2039,8 @@ backend_add_days_menu() {
   done
 
   echo
-  read -r -p "Número: " n
-  [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${RED}Inválido.${NC}"; return 0; }
+  read -r -p "NÃºmero: " n
+  [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${RED}InvÃ¡lido.${NC}"; return 0; }
   (( n>=1 && n<=${#lines[@]} )) || { echo -e "${RED}Fuera de rango.${NC}"; return 0; }
 
   local picked="${lines[$((n-1))]}"
@@ -2048,9 +2048,9 @@ backend_add_days_menu() {
   url="$(echo "$picked" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
   ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
 
-  read -r -p "Sumar días (ej: 30): " days
-  [[ "$days" =~ ^[0-9]+$ ]] || { echo -e "${RED}Días inválidos.${NC}"; return 0; }
-  (( days>=1 && days<=3650 )) || { echo -e "${RED}Días fuera de rango.${NC}"; return 0; }
+  read -r -p "Sumar dÃ­as (ej: 30): " days
+  [[ "$days" =~ ^[0-9]+$ ]] || { echo -e "${RED}DÃ­as invÃ¡lidos.${NC}"; return 0; }
+  (( days>=1 && days<=3650 )) || { echo -e "${RED}DÃ­as fuera de rango.${NC}"; return 0; }
 
   local now line created exp newexp
   now="$(date +%s)"
@@ -2067,13 +2067,13 @@ backend_add_days_menu() {
   fi
 
   backend_meta_upsert "$key" "$ip" "$port" "$created" "$newexp"
-  echo -e "${GRN}✅ Actualizado.${NC} Vence: $(backend_fmt_date "$newexp")"
+  echo -e "${GRN}âœ… Actualizado.${NC} Vence: $(backend_fmt_date "$newexp")"
   return 0
 }
 
 backend_delete_expired() {
   echo -e "${CYA}Eliminar backends expirados${NC}\n"
-  [[ -f "$BACKEND_META_FILE" ]] || { echo -e "${YLW}No hay metadatos aún.${NC}"; return 0; }
+  [[ -f "$BACKEND_META_FILE" ]] || { echo -e "${YLW}No hay metadatos aÃºn.${NC}"; return 0; }
 
   local now removed=0
   now="$(date +%s)"
@@ -2082,32 +2082,32 @@ backend_delete_expired() {
     [[ -z "$k" ]] && continue
     [[ -z "$exp" ]] && exp="0"
     if [[ "$exp" != "0" && "$exp" =~ ^[0-9]+$ && "$exp" -lt "$now" ]]; then
-      echo -e "${YLW}🗑️ Expirado:${NC} $k (venció $(backend_fmt_date "$exp"))"
+      echo -e "${YLW}ðŸ—‘ï¸ Expirado:${NC} $k (venciÃ³ $(backend_fmt_date "$exp"))"
       backend_delete_by_key "$k" >/dev/null 2>&1 && removed=$((removed+1)) || true
     fi
   done < "$BACKEND_META_FILE"
 
   if [[ "$removed" -eq 0 ]]; then
-    echo -e "${GRN}✅ No hay expirados.${NC}"
+    echo -e "${GRN}âœ… No hay expirados.${NC}"
   else
-    echo -e "${GRN}✅ Eliminados:${NC} $removed"
+    echo -e "${GRN}âœ… Eliminados:${NC} $removed"
   fi
   return 0
 }
 
 add_backend_menu() {
   while true; do
-    echo -e "${WHT}➕ Gestión de Backends${NC}"
-    echo -e "${DIM}Crear backends manual o con vencimiento (días).${NC}\n"
-    echo "1) ➕ Crear backend (manual, sin vencimiento)"
-    echo "2) 📅 Crear backend con días (expira)"
-    echo "3) 📋 Listar backends con fechas (creación/expiración)"
-    echo "4) ➕ Sumar días a un backend"
-    echo "5) 🗑️  Eliminar backend (manual)"
-    echo "6) 🧹 Eliminar expirados"
+    echo -e "${WHT}âž• GestiÃ³n de Backends${NC}"
+    echo -e "${DIM}Crear backends manual o con vencimiento (dÃ­as).${NC}\n"
+    echo "1) âž• Crear backend (manual, sin vencimiento)"
+    echo "2) ðŸ“… Crear backend con dÃ­as (expira)"
+    echo "3) ðŸ“‹ Listar backends con fechas (creaciÃ³n/expiraciÃ³n)"
+    echo "4) âž• Sumar dÃ­as a un backend"
+    echo "5) ðŸ—‘ï¸  Eliminar backend (manual)"
+    echo "6) ðŸ§¹ Eliminar expirados"
     echo "0) Volver"
     echo
-    read -r -p "Opción: " o
+    read -r -p "OpciÃ³n: " o
     echo
     case "$o" in
       1) add_backend; pause ;;
@@ -2117,7 +2117,7 @@ add_backend_menu() {
       5) delete_backend_pick; pause ;;
       6) backend_delete_expired; pause ;;
       0) return 0 ;;
-      *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
+      *) echo -e "${YLW}OpciÃ³n invÃ¡lida.${NC}"; pause ;;
     esac
   done
 }
@@ -2127,13 +2127,13 @@ add_backend() {
   echo -e "${DIM}Ejemplo: svpnene38 -> 179.43.112.38:80${NC}\n"
 
   read -r -p "Nombre del backend (ej: svpnene38): " key
-  validate_key "$key" || { echo -e "${RED}Nombre inválido.${NC}"; return 0; }
+  validate_key "$key" || { echo -e "${RED}Nombre invÃ¡lido.${NC}"; return 0; }
 
   read -r -p "IP (ej: 179.43.112.38): " ip
-  validate_ip "$ip" || { echo -e "${RED}IP inválida.${NC}"; return 0; }
+  validate_ip "$ip" || { echo -e "${RED}IP invÃ¡lida.${NC}"; return 0; }
 
   read -r -p "Puerto (ej: 80): " port
-  [[ "$port" =~ ^[0-9]{2,5}$ ]] || { echo -e "${RED}Puerto inválido.${NC}"; return 0; }
+  [[ "$port" =~ ^[0-9]{2,5}$ ]] || { echo -e "${RED}Puerto invÃ¡lido.${NC}"; return 0; }
 
   local url="http://${ip}:${port}"
 
@@ -2143,10 +2143,10 @@ add_backend() {
         if($0~re){ sub(/\"http:\\/\\/[^\\\"]+\"/, "\""url"\"") }
         print
       }' "$NGX_BACKENDS_MAP" > "${NGX_BACKENDS_MAP}.tmp" && mv "${NGX_BACKENDS_MAP}.tmp" "$NGX_BACKENDS_MAP"
-    echo -e "${GRN}✅ Actualizado:${NC} $key -> $ip:$port"
+    echo -e "${GRN}âœ… Actualizado:${NC} $key -> $ip:$port"
   else
     printf "        \"%s\" \"%s\";\n" "$key" "$url" >> "$NGX_BACKENDS_MAP"
-    echo -e "${GRN}✅ Agregado:${NC} $key -> $ip:$port"
+    echo -e "${GRN}âœ… Agregado:${NC} $key -> $ip:$port"
   fi
 
   rebuild_balancer_files
@@ -2155,7 +2155,7 @@ add_backend() {
   write_apply_conf
   nginx_test_reload
 
-  # guardar meta (creación) sin vencimiento
+  # guardar meta (creaciÃ³n) sin vencimiento
   local now line created exp
   now="$(date +%s)"
   line="$(backend_meta_get "$key" || true)"
@@ -2205,8 +2205,8 @@ delete_backend_pick() {
   done
 
   echo
-  read -r -p "Número: " n
-  [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${RED}Inválido.${NC}"; return 0; }
+  read -r -p "NÃºmero: " n
+  [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${RED}InvÃ¡lido.${NC}"; return 0; }
   (( n>=1 && n<=${#lines[@]} )) || { echo -e "${RED}Fuera de rango.${NC}"; return 0; }
 
   target="${lines[$((n-1))]}"
@@ -2220,7 +2220,7 @@ delete_backend_pick() {
   ensure_mothers_include
   write_apply_conf
   nginx_test_reload
-  echo -e "${GRN}✅ Eliminado.${NC}"
+  echo -e "${GRN}âœ… Eliminado.${NC}"
   backend_meta_remove "${delkey:-}" >/dev/null 2>&1 || true
   return 0
 }
@@ -2229,7 +2229,7 @@ delete_backend_pick() {
 healthcheck_all() {
   read_cfg
   echo -e "${CYA}Healthcheck (HTTP y latencia)${NC}"
-  echo -e "${DIM}HTTP 000 = no responde • timeout curl: ${CURL_TMO}s${NC}\n"
+  echo -e "${DIM}HTTP 000 = no responde â€¢ timeout curl: ${CURL_TMO}s${NC}\n"
   printf "%-22s %-18s %-6s %-6s %-10s\n" "BACKEND" "IP" "PORT" "HTTP" "LAT(ms)"
   echo "------------------------------------------------------------------"
   while IFS= read -r line; do
@@ -2246,10 +2246,10 @@ healthcheck_all() {
   return 0
 }
 
-# ------------------ VALIDAR CONEXIÓN ------------------
+# ------------------ VALIDAR CONEXIÃ“N ------------------
 validate_connection_test() {
   read_cfg
-  echo -e "${CYA}Validar conexión (dominio → backend por header)${NC}\n"
+  echo -e "${CYA}Validar conexiÃ³n (dominio â†’ backend por header)${NC}\n"
   pick_domain || return 0
   pick_backend || return 0
 
@@ -2274,11 +2274,11 @@ validate_connection_test() {
   return 0
 }
 
-# ------------------ TRÁFICO (IP / BACKEND) ------------------
+# ------------------ TRÃFICO (IP / BACKEND) ------------------
 traffic_stats() {
   read_cfg
 
-  echo -e "${CYA}Tráfico (por IP o Backend)${NC}"
+  echo -e "${CYA}TrÃ¡fico (por IP o Backend)${NC}"
   echo -e "${DIM}Archivo: ${STATS_LOG}${NC}"
   if [[ "${TRAFFIC_STATS_ENABLED}" == "true" ]]; then
     if [[ -n "${TRAFFIC_STATS_SINCE}" ]]; then
@@ -2299,34 +2299,34 @@ traffic_stats() {
 
   echo "1) Por IP"
   echo "2) Por Backend (header)"
-  echo "3) Activar logging de tráfico (stats)"
-  echo "4) Desactivar logging de tráfico (stats)"
-  echo "5) ⚙️  Escaneo permanente (scanner): menú"
-  echo "6) 📌 Totales acumulados (recalcular y mostrar)"
-  echo "7) 🧹 Borrar historial del scanner (acumulado)"
+  echo "3) Activar logging de trÃ¡fico (stats)"
+  echo "4) Desactivar logging de trÃ¡fico (stats)"
+  echo "5) âš™ï¸  Escaneo permanente (scanner): menÃº"
+  echo "6) ðŸ“Œ Totales acumulados (recalcular y mostrar)"
+  echo "7) ðŸ§¹ Borrar historial del scanner (acumulado)"
   echo "0) Volver"
-  read -r -p "Opción: " op
+  read -r -p "OpciÃ³n: " op
   echo
 
   case "$op" in
     0) return 0 ;;
     3)
       if [[ "${TRAFFIC_STATS_ENABLED}" == "true" ]]; then
-        echo -e "${YLW}Ya está activado.${NC}"
+        echo -e "${YLW}Ya estÃ¡ activado.${NC}"
         return 0
       fi
       set_traffic_stats_enabled true
-      echo -e "${GRN}✅ Logging activado.${NC}"
-      echo -e "${DIM}Desde ahora se acumula tráfico en:${NC} ${STATS_LOG}"
+      echo -e "${GRN}âœ… Logging activado.${NC}"
+      echo -e "${DIM}Desde ahora se acumula trÃ¡fico en:${NC} ${STATS_LOG}"
       return 0
       ;;
     4)
       if [[ "${TRAFFIC_STATS_ENABLED}" != "true" ]]; then
-        echo -e "${YLW}Ya está desactivado.${NC}"
+        echo -e "${YLW}Ya estÃ¡ desactivado.${NC}"
         return 0
       fi
       set_traffic_stats_enabled false
-      echo -e "${GRN}✅ Logging desactivado.${NC}"
+      echo -e "${GRN}âœ… Logging desactivado.${NC}"
       return 0
       ;;
     5)
@@ -2337,11 +2337,11 @@ traffic_stats() {
       echo -e "${CYA}Totales acumulados (usa todo el log y actualiza DB)${NC}"
       echo "1) Por IP"
       echo "2) Por Backend (header)"
-      read -r -p "Opción: " which
+      read -r -p "OpciÃ³n: " which
       case "$which" in
         1) traffic_scan_run_now "ip"; echo; traffic_show_from_db "ip" ;;
         2) traffic_scan_run_now "backend"; echo; traffic_show_from_db "backend" ;;
-        *) echo -e "${YLW}Opción inválida.${NC}" ;;
+        *) echo -e "${YLW}OpciÃ³n invÃ¡lida.${NC}" ;;
       esac
       return 0
       ;;
@@ -2364,10 +2364,10 @@ traffic_stats() {
         return 0
       fi
 
-      [[ -f "$STATS_LOG" ]] || { echo -e "${YLW}No existe todavía: ${STATS_LOG}${NC}"; return 0; }
+      [[ -f "$STATS_LOG" ]] || { echo -e "${YLW}No existe todavÃ­a: ${STATS_LOG}${NC}"; return 0; }
 
       local lines=5000
-      read -r -p "Cantidad de líneas a analizar (Enter=${lines}): " in
+      read -r -p "Cantidad de lÃ­neas a analizar (Enter=${lines}): " in
       lines="${in:-$lines}"
       echo
 
@@ -2388,7 +2388,7 @@ traffic_stats() {
         echo "---------------------------------------------------"
         ( set +o pipefail;
         tail -n "$lines" "$STATS_LOG" | awk -F'|' '
-          {be=$4; if(be=="") be="(vacío)"; bytes=$7; req[be]+=1; b[be]+=bytes}
+          {be=$4; if(be=="") be="(vacÃ­o)"; bytes=$7; req[be]+=1; b[be]+=bytes}
           END{
             for(i in b){
               mb=b[i]/1024/1024;
@@ -2399,47 +2399,47 @@ traffic_stats() {
 
       return 0
       ;;
-    *) echo "Opción inválida"; return 0 ;;
+    *) echo "OpciÃ³n invÃ¡lida"; return 0 ;;
   esac
 }
 
-# ------------------ BACKUP / RESTORE: SUBMENÚ ------------------
+# ------------------ BACKUP / RESTORE: SUBMENÃš ------------------
 backup_restore_menu() {
-  echo -e "${CYA}💾 Backup y restauración${NC}"
+  echo -e "${CYA}ðŸ’¾ Backup y restauraciÃ³n${NC}"
   echo -e "${DIM}Backup: guarda configs en /etc/nginx/backendmgr-backups. Restaurar: aplica un bundle y recarga Nginx.${NC}\n"
   echo "1) Crear backup (bundle)"
   echo "2) Restaurar backup (bundle)"
   echo "0) Volver"
-  read -r -p "Opción: " op
+  read -r -p "OpciÃ³n: " op
   echo
   case "$op" in
     1) backup_bundle ;;
     2) restore_bundle ;;
     0) return 0 ;;
-    *) echo -e "${YLW}Opción inválida.${NC}" ;;
+    *) echo -e "${YLW}OpciÃ³n invÃ¡lida.${NC}" ;;
   esac
   return 0
 }
 
 # ------------------ FIREWALL UFW ------------------
 ufw_open_port() {
-  echo -e "${CYA}Firewall UFW: permitir tráfico por puerto${NC}"
+  echo -e "${CYA}Firewall UFW: permitir trÃ¡fico por puerto${NC}"
   echo -e "${DIM}Ejemplo: 80/tcp (HTTP) o 443/tcp (HTTPS).${NC}\n"
 
-  command -v ufw >/dev/null 2>&1 || { echo -e "${YLW}UFW no está instalado. Instalalo con: apt install -y ufw${NC}"; return 0; }
+  command -v ufw >/dev/null 2>&1 || { echo -e "${YLW}UFW no estÃ¡ instalado. Instalalo con: apt install -y ufw${NC}"; return 0; }
 
   ufw status || true
   echo
 
   read -r -p "Puerto a habilitar (ej: 80 o 443): " port
-  [[ "$port" =~ ^[0-9]{2,5}$ ]] || { echo -e "${RED}Puerto inválido.${NC}"; return 0; }
+  [[ "$port" =~ ^[0-9]{2,5}$ ]] || { echo -e "${RED}Puerto invÃ¡lido.${NC}"; return 0; }
 
   ufw allow "${port}/tcp" || true
   [[ "$port" == "80" ]] && ufw allow 'Nginx HTTP' || true
   [[ "$port" == "443" ]] && ufw allow 'Nginx Full' || true
   ufw reload || true
 
-  echo -e "${GRN}✅ Regla aplicada.${NC}"
+  echo -e "${GRN}âœ… Regla aplicada.${NC}"
   ufw status || true
   return 0
 }
@@ -2456,28 +2456,28 @@ backup_bundle() {
     /etc/nginx/conf.d/backendmgr \
     /etc/backendmgr \
     /var/lib/backendmgr 2>/dev/null || true
-  echo -e "${GRN}✅ Backup creado:${NC} $out"
+  echo -e "${GRN}âœ… Backup creado:${NC} $out"
   return 0
 }
 
 restore_bundle() {
   echo -e "${CYA}Restaurar backup${NC}"
   ls -1t "${BACKUP_DIR}"/bundle-*.tar.gz 2>/dev/null | nl -w2 -s') ' || { echo "No hay backups."; return 0; }
-  read -r -p "Número: " n
+  read -r -p "NÃºmero: " n
   file="$(ls -1t "${BACKUP_DIR}"/bundle-*.tar.gz 2>/dev/null | sed -n "${n}p")"
-  [[ -n "${file:-}" ]] || { echo -e "${YLW}Selección inválida.${NC}"; return 0; }
+  [[ -n "${file:-}" ]] || { echo -e "${YLW}SelecciÃ³n invÃ¡lida.${NC}"; return 0; }
 
-  echo -e "${YLW}⚠️ Backup preventivo antes de restaurar...${NC}"
+  echo -e "${YLW}âš ï¸ Backup preventivo antes de restaurar...${NC}"
   backup_bundle
 
   echo -e "${DIM}Extrayendo:${NC} $file"
-  # --overwrite para que pise configs existentes (restauración real)
+  # --overwrite para que pise configs existentes (restauraciÃ³n real)
   if ! tar -xzf "$file" -C / --overwrite 2>/dev/null; then
     echo -e "${RED}ERROR:${NC} No pude extraer el backup. (archivo corrupto o permisos)"
     return 0
   fi
 
-  # Re-armar includes/snippets por si el backup viene de otra versión
+  # Re-armar includes/snippets por si el backup viene de otra versiÃ³n
   ensure_http_conf_maps
   ensure_mothers_include
   write_apply_conf
@@ -2487,7 +2487,7 @@ restore_bundle() {
   local ngx
   ngx="$(nginx_real_bin)"
 
-  # Reload/restart nginx (automático)
+  # Reload/restart nginx (automÃ¡tico)
   if command -v systemctl >/dev/null 2>&1; then
     if "$ngx" -t >/dev/null 2>&1; then
       systemctl reload nginx >/dev/null 2>&1 || systemctl restart nginx >/dev/null 2>&1 || true
@@ -2498,27 +2498,27 @@ restore_bundle() {
     nginx_test_reload
   fi
 
-  echo -e "${GRN}✅ Restaurado y recargado Nginx.${NC}"
+  echo -e "${GRN}âœ… Restaurado y recargado Nginx.${NC}"
   return 0
 }
 
 backup_restore_menu() {
   while true; do
-    echo -e "${CYA}💾 Backup y restauración${NC}"
+    echo -e "${CYA}ðŸ’¾ Backup y restauraciÃ³n${NC}"
     echo -e "${DIM}Backups en: ${BACKUP_DIR}${NC}
 "
     echo "1) Crear backup (bundle)"
     echo "2) Restaurar backup (elegir de lista)"
     echo "3) Listar backups"
     echo "0) Volver"
-    read -r -p "Opción: " op
+    read -r -p "OpciÃ³n: " op
     echo
     case "$op" in
       1) backup_bundle; pause ;;
       2) restore_bundle; pause ;;
       3) ls -1t "${BACKUP_DIR}"/bundle-*.tar.gz 2>/dev/null | nl -w2 -s') ' || echo "No hay backups."; pause ;;
       0) return 0 ;;
-      *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
+      *) echo -e "${YLW}OpciÃ³n invÃ¡lida.${NC}"; pause ;;
     esac
   done
 }
@@ -2532,16 +2532,16 @@ nginx_services_menu() {
   echo " 4) Reload (recargar config)"
   echo " 5) Restart (reiniciar)"
   echo " 0) Volver"
-  read -r -p "Opción: " op
+  read -r -p "OpciÃ³n: " op
   echo
   case "$op" in
     1) systemctl status nginx --no-pager || true ;;
-    2) systemctl stop nginx || true; echo -e "${GRN}✅ Stop OK.${NC}" ;;
-    3) systemctl start nginx || true; echo -e "${GRN}✅ Start OK.${NC}" ;;
-    4) nginx_test_reload; echo -e "${GRN}✅ Reload OK.${NC}" ;;
-    5) systemctl restart nginx || true; echo -e "${GRN}✅ Restart OK.${NC}" ;;
+    2) systemctl stop nginx || true; echo -e "${GRN}âœ… Stop OK.${NC}" ;;
+    3) systemctl start nginx || true; echo -e "${GRN}âœ… Start OK.${NC}" ;;
+    4) nginx_test_reload; echo -e "${GRN}âœ… Reload OK.${NC}" ;;
+    5) systemctl restart nginx || true; echo -e "${GRN}âœ… Restart OK.${NC}" ;;
     0) return 0 ;;
-    *) echo "Opción inválida" ;;
+    *) echo "OpciÃ³n invÃ¡lida" ;;
   esac
   return 0
 }
@@ -2559,7 +2559,7 @@ ramrefresh_install_or_update() {
   [[ -n "$every" ]] || return 0
 
   if ! have_systemd; then
-    echo -e "${YLW}⚠️ No hay systemd/systemctl. No puedo programarlo en este sistema.${NC}"
+    echo -e "${YLW}âš ï¸ No hay systemd/systemctl. No puedo programarlo en este sistema.${NC}"
     return 0
   fi
 
@@ -2592,26 +2592,26 @@ WantedBy=timers.target
   systemd_reload_daemon
   systemd_enable_start_timer "backendmgr-ramrefresh.timer"
 
-  echo -e "${GRN}✅ RAM refresh programado cada:${NC} ${every}"
+  echo -e "${GRN}âœ… RAM refresh programado cada:${NC} ${every}"
   return 0
 }
 
 ramrefresh_disable() {
   if ! have_systemd; then
-    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    echo -e "${YLW}âš ï¸ No hay systemd/systemctl.${NC}"
     return 0
   fi
 
   systemd_disable_stop_timer "backendmgr-ramrefresh.timer"
   rm -f /etc/systemd/system/backendmgr-ramrefresh.timer /etc/systemd/system/backendmgr-ramrefresh.service 2>/dev/null || true
   systemd_reload_daemon
-  echo -e "${GRN}✅ RAM refresh desactivado.${NC}"
+  echo -e "${GRN}âœ… RAM refresh desactivado.${NC}"
   return 0
 }
 
 ramrefresh_status() {
   if ! have_systemd; then
-    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    echo -e "${YLW}âš ï¸ No hay systemd/systemctl.${NC}"
     return 0
   fi
 
@@ -2628,19 +2628,19 @@ ramrefresh_menu() {
   echo "2) Ver estado"
   echo "3) Desactivar"
   echo "0) Volver"
-  read -r -p "Opción: " op
+  read -r -p "OpciÃ³n: " op
   echo
   case "$op" in
     1)
       echo -e "${DIM}Ejemplos: 15min | 30min | 1h | 2h${NC}"
-      read -r -p "Cada cuánto (formato systemd, ej 30min / 2h): " every
+      read -r -p "Cada cuÃ¡nto (formato systemd, ej 30min / 2h): " every
       [[ -n "${every:-}" ]] || { echo -e "${YLW}Cancelado.${NC}"; return 0; }
       ramrefresh_install_or_update "$every"
       ;;
     2) ramrefresh_status ;;
     3) ramrefresh_disable ;;
     0) return 0 ;;
-    *) echo -e "${YLW}Opción inválida.${NC}" ;;
+    *) echo -e "${YLW}OpciÃ³n invÃ¡lida.${NC}" ;;
   esac
   return 0
 }
@@ -2652,14 +2652,14 @@ nginx_autostart_menu() {
   echo "2) Desactivar (disable)"
   echo "3) Ver estado"
   echo "0) Volver"
-  read -r -p "Opción: " op
+  read -r -p "OpciÃ³n: " op
   echo
   case "$op" in
-    1) systemctl enable nginx >/dev/null 2>&1 || true; echo -e "${GRN}✅ Nginx habilitado al inicio.${NC}" ;;
-    2) systemctl disable nginx >/dev/null 2>&1 || true; echo -e "${GRN}✅ Nginx deshabilitado al inicio.${NC}" ;;
+    1) systemctl enable nginx >/dev/null 2>&1 || true; echo -e "${GRN}âœ… Nginx habilitado al inicio.${NC}" ;;
+    2) systemctl disable nginx >/dev/null 2>&1 || true; echo -e "${GRN}âœ… Nginx deshabilitado al inicio.${NC}" ;;
     3) systemctl is-enabled nginx 2>/dev/null || true; systemctl status nginx --no-pager 2>/dev/null || true ;;
     0) return 0 ;;
-    *) echo -e "${YLW}Opción inválida.${NC}" ;;
+    *) echo -e "${YLW}OpciÃ³n invÃ¡lida.${NC}" ;;
   esac
   return 0
 }
@@ -2698,33 +2698,33 @@ WantedBy=timers.target
 nginx_sched_enable() {
   local action="$1" every="$2"
   if ! have_systemd; then
-    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    echo -e "${YLW}âš ï¸ No hay systemd/systemctl.${NC}"
     return 0
   fi
   nginx_sched_write_units "$action" "$every"
   systemd_reload_daemon
   systemd_enable_start_timer "backendmgr-nginx-${action}.timer"
-  echo -e "${GRN}✅ Nginx ${action} programado cada:${NC} ${every}"
+  echo -e "${GRN}âœ… Nginx ${action} programado cada:${NC} ${every}"
   return 0
 }
 
 nginx_sched_disable() {
   local action="$1"
   if ! have_systemd; then
-    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    echo -e "${YLW}âš ï¸ No hay systemd/systemctl.${NC}"
     return 0
   fi
   systemd_disable_stop_timer "backendmgr-nginx-${action}.timer"
   rm -f "/etc/systemd/system/backendmgr-nginx-${action}.timer" "/etc/systemd/system/backendmgr-nginx-${action}.service" 2>/dev/null || true
   systemd_reload_daemon
-  echo -e "${GRN}✅ Nginx ${action} desactivado.${NC}"
+  echo -e "${GRN}âœ… Nginx ${action} desactivado.${NC}"
   return 0
 }
 
 nginx_sched_status() {
   local action="$1"
   if ! have_systemd; then
-    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    echo -e "${YLW}âš ï¸ No hay systemd/systemctl.${NC}"
     return 0
   fi
   systemctl status "backendmgr-nginx-${action}.timer" --no-pager 2>/dev/null || true
@@ -2743,12 +2743,12 @@ nginx_sched_menu() {
   echo "5) Desactivar RESTART"
   echo "6) Estado RESTART"
   echo "0) Volver"
-  read -r -p "Opción: " op
+  read -r -p "OpciÃ³n: " op
   echo
   case "$op" in
     1)
       echo -e "${DIM}Ejemplos: 15min | 30min | 1h | 2h${NC}"
-      read -r -p "Cada cuánto (ej 30min / 2h): " every
+      read -r -p "Cada cuÃ¡nto (ej 30min / 2h): " every
       [[ -n "${every:-}" ]] || { echo -e "${YLW}Cancelado.${NC}"; return 0; }
       nginx_sched_enable "reload" "$every"
       ;;
@@ -2756,14 +2756,14 @@ nginx_sched_menu() {
     3) nginx_sched_status "reload" ;;
     4)
       echo -e "${DIM}Ejemplos: 1h | 6h | 12h | 24h${NC}"
-      read -r -p "Cada cuánto (ej 6h / 12h): " every
+      read -r -p "Cada cuÃ¡nto (ej 6h / 12h): " every
       [[ -n "${every:-}" ]] || { echo -e "${YLW}Cancelado.${NC}"; return 0; }
       nginx_sched_enable "restart" "$every"
       ;;
     5) nginx_sched_disable "restart" ;;
     6) nginx_sched_status "restart" ;;
     0) return 0 ;;
-    *) echo -e "${YLW}Opción inválida.${NC}" ;;
+    *) echo -e "${YLW}OpciÃ³n invÃ¡lida.${NC}" ;;
   esac
   return 0
 }
@@ -2804,7 +2804,7 @@ cleanup_install_or_update() {
   [[ "$keep_days" =~ ^[0-9]+$ ]] || keep_days="30"
 
   if ! have_systemd; then
-    echo -e "${YLW}⚠️ No hay systemd/systemctl. No puedo programarlo en este sistema.${NC}"
+    echo -e "${YLW}âš ï¸ No hay systemd/systemctl. No puedo programarlo en este sistema.${NC}"
     return 0
   fi
 
@@ -2840,25 +2840,25 @@ WantedBy=timers.target
   systemd_reload_daemon
   systemd_enable_start_timer "backendmgr-cleanup.timer"
 
-  echo -e "${GRN}✅ Limpieza programada cada:${NC} ${every}  ${DIM}(borra >${keep_days} días)${NC}"
+  echo -e "${GRN}âœ… Limpieza programada cada:${NC} ${every}  ${DIM}(borra >${keep_days} dÃ­as)${NC}"
   return 0
 }
 
 cleanup_disable() {
   if ! have_systemd; then
-    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    echo -e "${YLW}âš ï¸ No hay systemd/systemctl.${NC}"
     return 0
   fi
   systemd_disable_stop_timer "backendmgr-cleanup.timer"
   rm -f /etc/systemd/system/backendmgr-cleanup.timer /etc/systemd/system/backendmgr-cleanup.service 2>/dev/null || true
   systemd_reload_daemon
-  echo -e "${GRN}✅ Limpieza desactivada.${NC}"
+  echo -e "${GRN}âœ… Limpieza desactivada.${NC}"
   return 0
 }
 
 cleanup_status() {
   if ! have_systemd; then
-    echo -e "${YLW}⚠️ No hay systemd/systemctl.${NC}"
+    echo -e "${YLW}âš ï¸ No hay systemd/systemctl.${NC}"
     return 0
   fi
   systemctl status backendmgr-cleanup.timer --no-pager 2>/dev/null || true
@@ -2868,51 +2868,51 @@ cleanup_status() {
 }
 
 cleanup_menu() {
-  echo -e "${CYA}🧹 Limpieza automática (disco)${NC}"
+  echo -e "${CYA}ðŸ§¹ Limpieza automÃ¡tica (disco)${NC}"
   echo -e "${DIM}Borra backups viejos, limpia cache apt y recorta journal. No toca configs actuales.${NC}\n"
-  echo "1) Activar / Cambiar (intervalo + días a conservar)"
+  echo "1) Activar / Cambiar (intervalo + dÃ­as a conservar)"
   echo "2) Ejecutar ahora"
   echo "3) Ver estado"
   echo "4) Desactivar"
   echo "0) Volver"
-  read -r -p "Opción: " op
+  read -r -p "OpciÃ³n: " op
   echo
   case "$op" in
     1)
       echo -e "${DIM}Ejemplos intervalo: 6h | 12h | 24h${NC}"
       read -r -p "Intervalo (Enter=12h): " every
       every="${every:-12h}"
-      read -r -p "Conservar backups/logs (días, Enter=30): " keep
+      read -r -p "Conservar backups/logs (dÃ­as, Enter=30): " keep
       keep="${keep:-30}"
       cleanup_install_or_update "$every" "$keep"
       ;;
     2)
-      read -r -p "Conservar backups/logs (días, Enter=30): " keep
+      read -r -p "Conservar backups/logs (dÃ­as, Enter=30): " keep
       keep="${keep:-30}"
       cleanup_run_now "$keep"
-      echo -e "${GRN}✅ Limpieza ejecutada.${NC}"
+      echo -e "${GRN}âœ… Limpieza ejecutada.${NC}"
       ;;
     3) cleanup_status ;;
     4) cleanup_disable ;;
     0) return 0 ;;
-    *) echo -e "${YLW}Opción inválida.${NC}" ;;
+    *) echo -e "${YLW}OpciÃ³n invÃ¡lida.${NC}" ;;
   esac
   return 0
 }
 
 maintenance_menu() {
   if ! have_systemd; then
-    echo -e "${YLW}⚠️ Este menú requiere systemd/systemctl (Ubuntu normal sí lo tiene).${NC}"
+    echo -e "${YLW}âš ï¸ Este menÃº requiere systemd/systemctl (Ubuntu normal sÃ­ lo tiene).${NC}"
     return 0
   fi
 
-  echo -e "${CYA}🧰 Mantenimiento programado${NC}\n"
-  echo "1) 🧠 Refresco RAM (drop_caches) programado"
-  echo "2) ⚙️  Nginx: habilitar/deshabilitar arranque con el sistema"
-  echo "3) 🔁 Nginx: programar reload/restart"
-  echo "4) 📋 Ver timers backendmgr"
+  echo -e "${CYA}ðŸ§° Mantenimiento programado${NC}\n"
+  echo "1) ðŸ§  Refresco RAM (drop_caches) programado"
+  echo "2) âš™ï¸  Nginx: habilitar/deshabilitar arranque con el sistema"
+  echo "3) ðŸ” Nginx: programar reload/restart"
+  echo "4) ðŸ“‹ Ver timers backendmgr"
   echo "0) Volver"
-  read -r -p "Opción: " op
+  read -r -p "OpciÃ³n: " op
   echo
   case "$op" in
     1) ramrefresh_menu ;;
@@ -2920,7 +2920,7 @@ maintenance_menu() {
     3) nginx_sched_menu ;;
     4) systemctl list-timers --all | grep -E 'backendmgr-' || { echo "No hay timers backendmgr."; } ;;
     0) return 0 ;;
-    *) echo -e "${YLW}Opción inválida.${NC}" ;;
+    *) echo -e "${YLW}OpciÃ³n invÃ¡lida.${NC}" ;;
   esac
   return 0
 }
@@ -2931,7 +2931,7 @@ speedtest_install_if_needed() {
     return 0
   fi
 
-  echo -e "${YLW}⚠️ Speedtest no está instalado.${NC}"
+  echo -e "${YLW}âš ï¸ Speedtest no estÃ¡ instalado.${NC}"
   echo -e "${DIM}Intento instalar speedtest-cli (apt).${NC}"
 
   export DEBIAN_FRONTEND=noninteractive
@@ -2939,23 +2939,23 @@ speedtest_install_if_needed() {
   apt-get install -y speedtest-cli >/dev/null 2>&1 || true
 
   if command -v speedtest >/dev/null 2>&1; then
-    echo -e "${GRN}✅ Speedtest instalado (speedtest-cli).${NC}"
+    echo -e "${GRN}âœ… Speedtest instalado (speedtest-cli).${NC}"
     return 0
   fi
 
   echo -e "${RED}ERROR:${NC} No pude instalar speedtest-cli."
-  echo -e "${DIM}Probá manualmente:${NC} apt-get update && apt-get install -y speedtest-cli"
+  echo -e "${DIM}ProbÃ¡ manualmente:${NC} apt-get update && apt-get install -y speedtest-cli"
   return 0
 }
 
 speedtest_menu() {
   echo -e "${CYA}Speedtest del servidor (Ping / Bajada / Subida)${NC}"
-  echo -e "${DIM}Usa speedtest-cli. Puede tardar 20–60s según red.${NC}\n"
+  echo -e "${DIM}Usa speedtest-cli. Puede tardar 20â€“60s segÃºn red.${NC}\n"
 
   speedtest_install_if_needed
 
   if ! command -v speedtest >/dev/null 2>&1; then
-    echo -e "${YLW}No se pudo ejecutar speedtest porque no está instalado.${NC}"
+    echo -e "${YLW}No se pudo ejecutar speedtest porque no estÃ¡ instalado.${NC}"
     return 0
   fi
 
@@ -3007,7 +3007,7 @@ restore_nginx_binary(){
     ensure_nginx_wrapper_quiet_on_success(){
       # Repara el wrapper nginx (si existe) para:
       # - evitar "rc: unbound variable" con set -u
-      # - NO mostrar "⚠️ El panel terminó..." si rc=0
+      # - NO mostrar "âš ï¸ El panel terminÃ³..." si rc=0
       # - evitar errores tipo "conditional binary operator expected"
       local candidates=(/usr/sbin/nginx /usr/local/bin/nginx /usr/bin/nginx)
       local SBIN
@@ -3066,7 +3066,7 @@ run_panel() {
     if [[ ! "$rc" =~ ^[0-9]+$ ]]; then rc=0; fi
     if [[ "$rc" -ne 0 ]]; then
       echo "" >/dev/tty
-      echo "⚠️ El panel terminó (rc=$rc). Log: $LOG" >/dev/tty
+      echo "âš ï¸ El panel terminÃ³ (rc=$rc). Log: $LOG" >/dev/tty
       read -r -p "Enter para volver..." _ </dev/tty || true
     fi
   fi
@@ -3076,7 +3076,7 @@ run_panel() {
 # END BACKENDMGR SAFE RUN_PANEL
 );
 
-          # Reemplaza cualquier definición existente de run_panel() { ... }
+          # Reemplaza cualquier definiciÃ³n existente de run_panel() { ... }
           s/run_panel\(\)\s*\{.*?\n\}/$safe/s;
 
         ' "$SBIN" > "$tmp" 2>/dev/null || { rm -f "$tmp"; continue; }
@@ -3096,12 +3096,12 @@ run_panel() {
 
 
 uninstall_backendmgr(){
-  echo -e "${RED}🗑️  DESINSTALAR Backend Manager${NC}"
+  echo -e "${RED}ðŸ—‘ï¸  DESINSTALAR Backend Manager${NC}"
   echo -e "${DIM}Esto elimina panel, configs, estado, timers y restaura /usr/sbin/nginx real.${NC}"
   echo
-  read -r -p "Confirmar desinstalación TOTAL (s/N): " yn
+  read -r -p "Confirmar desinstalaciÃ³n TOTAL (s/N): " yn
   case "${yn,,}" in
-    s|si|sí|y|yes) ;;
+    s|si|sÃ­|y|yes) ;;
     *) echo -e "${YLW}Cancelado.${NC}"; return 0 ;;
   esac
 
@@ -3109,7 +3109,7 @@ uninstall_backendmgr(){
   echo "[1/6] Deteniendo timers/servicios..."
   cleanup_systemd
 
-  echo "[2/6] Restaurando nginx (quitando wrapper si existía)..."
+  echo "[2/6] Restaurando nginx (quitando wrapper si existÃ­a)..."
   restore_nginx_binary
 
   echo "[3/6] Removiendo panel..."
@@ -3127,35 +3127,35 @@ uninstall_backendmgr(){
   rm -rf /etc/nginx/backendmgr-backups 2>/dev/null || true
 
   echo
-  echo -e "${GRN}✅ Listo. Backend Manager fue removido.${NC}"
-  echo -e "${DIM}Si querés desinstalar dependencias (nginx/jq/etc.), hacelo manualmente.${NC}"
+  echo -e "${GRN}âœ… Listo. Backend Manager fue removido.${NC}"
+  echo -e "${DIM}Si querÃ©s desinstalar dependencias (nginx/jq/etc.), hacelo manualmente.${NC}"
   echo
   exit 0
 }
 
 # ------------------ MENU ------------------
 menu() {
-  echo -e "${WHT}📌 MENÚ PRINCIPAL${NC}"
-  echo -e "${DIM}Elegí una opción (número) y Enter.${NC}"
+  echo -e "${WHT}ðŸ“Œ MENÃš PRINCIPAL${NC}"
+  echo -e "${DIM}ElegÃ­ una opciÃ³n (nÃºmero) y Enter.${NC}"
   echo
-  echo -e "${BCYA}[01]${NC} 🌐 Dominios madre (crear / editar / eliminar)"
-  echo -e "${BCYA}[02]${NC} ➕ Agregar backend (rápido: nombre + IP + puerto)"
-  echo -e "${BCYA}[03]${NC} 👥 Administrar usuarios backend (crear/editar/vencimiento)"
-  echo -e "${BCYA}[04]${NC} 🌍 Listar dominios madre (servers)"
-  echo -e "${BCYA}[06]${NC} ✅ Healthcheck (HTTP y latencia)"
-  echo -e "${BCYA}[07]${NC} 🧪 Validar conexión (dominio → backend por header)"
-  echo -e "${BCYA}[08]${NC} 🧩 Editar timeouts del dominio madre (manual por nombre)"
-  echo -e "${BCYA}[09]${NC} ⚖️ Balanceo de MADRES (VPS pool por dominio)"
-  echo -e "${BCYA}[10]${NC} 🚦 Limitar ancho de banda por IP o Backend (limit_rate)"
-  echo -e "${BCYA}[11]${NC} 📊 Tráfico por IP / Backend (stats log + scanner)"
-  echo -e "${BCYA}[12]${NC} 🔥 Firewall UFW: abrir puerto (80/443/otro)"
-  echo -e "${BCYA}[13]${NC} 💾 Backup y restauración"
-  echo -e "${BCYA}[15]${NC} ⚙️  Servicios de Nginx (Status/Stop/Start/Reload/Restart)"
-  echo -e "${BCYA}[16]${NC} 🚀 Speedtest (Ping / Bajada / Subida)"
-  echo -e "${BCYA}[17]${NC} 🧰 Mantenimiento programado (RAM / Nginx timers)"
-  echo -e "${BCYA}[18]${NC} 🗑️  Desinstalar Backend Manager"
+  echo -e "${BCYA}[01]${NC} ðŸŒ Dominios madre (crear / editar / eliminar)"
+  echo -e "${BCYA}[02]${NC} âž• Agregar backend (rÃ¡pido: nombre + IP + puerto)"
+  echo -e "${BCYA}[03]${NC} ðŸ‘¥ Administrar usuarios backend (crear/editar/vencimiento)"
+  echo -e "${BCYA}[04]${NC} ðŸŒ Listar dominios madre (servers)"
+  echo -e "${BCYA}[06]${NC} âœ… Healthcheck (HTTP y latencia)"
+  echo -e "${BCYA}[07]${NC} ðŸ§ª Validar conexiÃ³n (dominio â†’ backend por header)"
+  echo -e "${BCYA}[08]${NC} ðŸ§© Editar timeouts del dominio madre (manual por nombre)"
+  echo -e "${BCYA}[09]${NC} âš–ï¸ Balanceo de MADRES (VPS pool por dominio)"
+  echo -e "${BCYA}[10]${NC} ðŸš¦ Limitar ancho de banda por IP o Backend (limit_rate)"
+  echo -e "${BCYA}[11]${NC} ðŸ“Š TrÃ¡fico por IP / Backend (stats log + scanner)"
+  echo -e "${BCYA}[12]${NC} ðŸ”¥ Firewall UFW: abrir puerto (80/443/otro)"
+  echo -e "${BCYA}[13]${NC} ðŸ’¾ Backup y restauraciÃ³n"
+  echo -e "${BCYA}[15]${NC} âš™ï¸  Servicios de Nginx (Status/Stop/Start/Reload/Restart)"
+  echo -e "${BCYA}[16]${NC} ðŸš€ Speedtest (Ping / Bajada / Subida)"
+  echo -e "${BCYA}[17]${NC} ðŸ§° Mantenimiento programado (RAM / Nginx timers)"
+  echo -e "${BCYA}[18]${NC} ðŸ—‘ï¸  Desinstalar Backend Manager"
   echo
-  echo -e "${BCYA}[00]${NC} 🚪 Salir"
+  echo -e "${BCYA}[00]${NC} ðŸšª Salir"
   echo
 }
 
@@ -3172,7 +3172,7 @@ main() {
   rebuild_balancer_files >/dev/null 2>&1 || true
   rebuild_mothers_upstreams >/dev/null 2>&1 || true
 
-  # ✅ Si el scanner está activado en config, aseguramos helper + timer (sin tocar nada más)
+  # âœ… Si el scanner estÃ¡ activado en config, aseguramos helper + timer (sin tocar nada mÃ¡s)
   if have_systemd && [[ "${TRAFFIC_SCAN_ENABLED}" == "true" ]]; then
     traffic_scan_write_helper >/dev/null 2>&1 || true
     # si el timer no existe, lo recreamos
@@ -3188,7 +3188,7 @@ main() {
   while true; do
     banner
     menu
-    read -r -p "Opción: " opt
+    read -r -p "OpciÃ³n: " opt
     echo
 
     case "$opt" in
@@ -3205,13 +3205,13 @@ main() {
      11) traffic_stats; pause ;;
      12) ufw_open_port; pause ;;
      13) backup_restore_menu; pause ;;
-     14) backup_restore_menu; pause ;;  # alias legacy (no se muestra en menú)
+     14) backup_restore_menu; pause ;;  # alias legacy (no se muestra en menÃº)
      15) nginx_services_menu; pause ;;
      16) speedtest_menu; pause ;;
      17) maintenance_menu; pause ;;
      18) uninstall_backendmgr ;;
       0) exit 0 ;;
-      *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
+      *) echo -e "${YLW}OpciÃ³n invÃ¡lida.${NC}"; pause ;;
     esac
   done
 }
