@@ -284,7 +284,7 @@ install_wrapper_nginx(){
 
   cat > "$SBIN" <<'WRAP'
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 PANEL="/usr/local/bin/backendmgr"
 REAL="/usr/sbin/nginx.real"
@@ -292,15 +292,21 @@ LOG="/var/log/backendmgr.wrapper.log"
 
 log() {
   mkdir -p /var/log 2>/dev/null || true
-  printf "[%s] %s\n" "$(date +%F\ %T)" "$*" >>"$LOG" 2>/dev/null || true
+  printf "[%s] %s
+" "$(date +%F\ %T)" "$*" >>"$LOG" 2>/dev/null || true
 }
 
 run_panel() {
+  local rc=0
   log "RUN_PANEL user=$(id -u) tty=$(tty 2>/dev/null || echo none) cwd=$(pwd)"
 
   if [[ ! -x "$PANEL" ]]; then
-    echo "ERROR: no existe o no es ejecutable: $PANEL" >/dev/tty 2>/dev/null || true
-    log "ERROR panel no executable"
+    log "ERROR panel no executable: $PANEL"
+    if [[ -r /dev/tty && -w /dev/tty ]]; then
+      echo "ERROR: no existe o no es ejecutable: $PANEL" >/dev/tty 2>/dev/null || true
+    else
+      echo "ERROR: no existe o no es ejecutable: $PANEL" >&2
+    fi
     return 127
   fi
 
@@ -316,7 +322,8 @@ run_panel() {
 
   log "PANEL_EXIT rc=$rc"
 
-  if [[ -r /dev/tty && -w /dev/tty ]]; then
+  # Solo avisar si hubo error
+  if [[ "$rc" -ne 0 ]] && [[ -r /dev/tty && -w /dev/tty ]]; then
     echo "" >/dev/tty
     echo "⚠️ El panel terminó (rc=$rc). Log: $LOG" >/dev/tty
     read -r -p "Enter para volver..." _ </dev/tty || true
@@ -325,19 +332,22 @@ run_panel() {
   return "$rc"
 }
 
+# Si se llama sin argumentos, abrir panel
 if [[ $# -eq 0 ]]; then
   run_panel
   exit $?
 fi
 
 case "${1:-}" in
-  menu|panel|nenenet)
+  menu|panel|elnene)
     run_panel
     exit $?
   ;;
 esac
 
+# Delegar al nginx real
 if [[ ! -x "$REAL" ]]; then
+  # fallback por si no existe .real
   REAL="/usr/sbin/nginx"
 fi
 exec "$REAL" "$@"
