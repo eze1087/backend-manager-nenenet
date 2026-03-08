@@ -664,11 +664,11 @@ banner() {
   scan_s="$(traffic_scan_state_short)"
 
   # Título
-  local title="🔥  BACKEND MANAGER NENENET 3.0 v${APP_VER}  🔥"
+  local title="🔥  BACKEND MANAGER • El NeNe Full 3.0 v${APP_VER}  🔥"
   local W=78
 
   printf "${BG_RED}${WHT}%s${NC}${BG_NONE}
-" "$(printf "%-*s" "$W" "$title")"
+" "$(disp_center_fit "$title" "$W")"
   printf "${BG_DARK}${BCYA}%s${NC}${BG_NONE}
 " "$(printf "%-*s" "$W" "")"
   printf "${BG_DARK}${WHT}  📅 FECHA: ${GRN}%-19s${WHT}   🌐 IP: ${GRN}%-15s${NC}${BG_NONE}
