@@ -668,48 +668,54 @@ banner() {
   local title="🔥  BACKEND MANAGER • El NeNe Full 3.0 v${APP_VER}  🔥"
   local W=78
 
+  # Separadores (para mantener personalización)
+  local SEP_THIN SEP_THICK
+  SEP_THIN="$(printf "%*s" "$W" "" | tr " " "─")"
+  SEP_THICK="$(printf "%*s" "$W" "" | tr " " "═")"
+
   printf "${BG_RED}${WHT}%s${NC}${BG_NONE}
 " "$(disp_center_fit "$title" "$W")"
-  printf "${BG_DARK}${BCYA}%s${NC}${BG_NONE}
-" "$(printf "%-*s" "$W" "")"
-  printf "${BG_DARK}${WHT}  📅 FECHA: ${GRN}%-19s${WHT}   🌐 IP: ${GRN}%-15s${NC}${BG_NONE}
-" "$dt" "$ip"
-  printf "${BG_DARK}${BCYA}%s${NC}${BG_NONE}
-" "$(printf "%-*s" "$W" "")"
 
-  # Estado general (2 columnas)
+  # Bloque superior con fondo distinto + líneas divisorias
+  printf "${BG_PANEL}${BCYA}%s${NC}${BG_NONE}
+" "$SEP_THIN"
+  printf "${BG_PANEL}${WHT}  📅 FECHA: ${GRN}%-19s${WHT}   🌐 IP: ${GRN}%-15s${NC}${BG_NONE}
+" "$dt" "$ip"
+  printf "${BG_PANEL}${BCYA}%s${NC}${BG_NONE}
+" "$SEP_THICK"
+
+  # Estado general
   local ngx_label ngx_color
   if [[ "$ng_state" == "ON" ]]; then ngx_label="✅ ACTIVO"; ngx_color="${BGRN}"; else ngx_label="❌ OFF"; ngx_color="${BRED}"; fi
 
-  printf "${BG_DARK}  ⚙️  Nginx: ${ngx_color}%-10s${WHT}   📁 Dominios: ${GRN}%-3s${WHT}   🧱 Backends: ${GRN}%-3s${NC}${BG_NONE}
+  printf "${BG_PANEL}  ⚙️  Nginx: ${ngx_color}%-10s${WHT}   📁 Dominios: ${GRN}%-3s${WHT}   🧱 Backends: ${GRN}%-3s${NC}${BG_NONE}
 " "$ngx_label" "$dcount" "$bcount"
-  printf "${BG_DARK}  👑 Dominio madre: ${GRN}%-52s${NC}${BG_NONE}
+  printf "${BG_PANEL}  👑 Dominio madre: ${GRN}%-52s${NC}${BG_NONE}
 " "$(disp_trunc "$dom_active" 52)"
-  printf "${BG_DARK}  🏷️  Header: ${GRN}%-12s${WHT}   📈 Tráfico: ${GRN}%-12s${WHT}   🔎 Scanner: ${GRN}%-18s${NC}${BG_NONE}
-" \
-    "$(disp_trunc "$HEADER_NAME" 12)" "$(disp_trunc "$traffic_s" 12)" "$(disp_trunc "$scan_s" 18)"
-  printf "${BG_DARK}  💾 Backup: ${GRN}%-60s${NC}${BG_NONE}
+  printf "${BG_PANEL}  🏷️  Header: ${GRN}%-12s${WHT}   📈 Tráfico: ${GRN}%-12s${WHT}   🔎 Scanner: ${GRN}%-18s${NC}${BG_NONE}
+"     "$(disp_trunc "$HEADER_NAME" 12)" "$(disp_trunc "$traffic_s" 12)" "$(disp_trunc "$scan_s" 18)"
+  printf "${BG_PANEL}  💾 Backup: ${GRN}%-60s${NC}${BG_NONE}
 " "$(disp_trunc "$bkp" 60)"
 
-  printf "${BG_DARK}${BCYA}%s${NC}${BG_NONE}
-" "$(printf "%-*s" "$W" "")"
+  printf "${BG_PANEL}${BCYA}%s${NC}${BG_NONE}
+" "$SEP_THICK"
 
   # Recursos (líneas compactas)
-  printf "${BG_DARK}  %s${NC}${BG_NONE}
+  printf "${BG_PANEL}  %s${NC}${BG_NONE}
 " "$(strip_ansi "$(disk_usage_line)" | sed 's/^💽 DISK: /💽 DISCO: /')"
-  printf "${BG_DARK}  %s${NC}${BG_NONE}
+  printf "${BG_PANEL}  %s${NC}${BG_NONE}
 " "$(strip_ansi "$(mem_used_line)" | sed 's/^🧠 RAM: /🧠 RAM: /')"
-  printf "${BG_DARK}  %s${NC}${BG_NONE}
+  printf "${BG_PANEL}  %s${NC}${BG_NONE}
 " "$(strip_ansi "$(cpu_line)")"
-  printf "${BG_DARK}  %s${NC}${BG_NONE}
+  printf "${BG_PANEL}  %s${NC}${BG_NONE}
 " "$(strip_ansi "$(net_totals_line)" | sed 's/^📡 NET: /📡 RED: /')"
 
   # Timers
-  printf "${BG_DARK}  %s${NC}${BG_NONE}
+  printf "${BG_PANEL}  %s${NC}${BG_NONE}
 " "$(strip_ansi "$(ramrefresh_last_line)")"
 
-  printf "${BG_DARK}${BCYA}%s${NC}${BG_NONE}
-" "$(printf "%-*s" "$W" "")"
+  printf "${BG_PANEL}${BCYA}%s${NC}${BG_NONE}
+" "$SEP_THIN"
   echo
 }
 
