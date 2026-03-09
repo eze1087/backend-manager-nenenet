@@ -2251,15 +2251,18 @@ payload_out() {
 
 payload_print_block() {
   # Imprime un bloque "copiable" para Termius/Bitvise.
-  # Todo lo que esté entre START/END es solo el payload.
+  # ✅ Tip: seleccioná desde [START_PAYLOAD] hasta [END_PAYLOAD] y copiá.
   local payload="$1"
   local O; O="$(payload_out)"
+
   echo >"$O"
+  echo ">>> COPY BELOW (seleccioná de [START_PAYLOAD] a [END_PAYLOAD]) <<<" >"$O"
   echo "[START_PAYLOAD]" >"$O"
   printf "%s\n" "$payload" >"$O"
   echo "[END_PAYLOAD]" >"$O"
   echo >"$O"
 }
+
 
 
 payload_list_templates() {
@@ -2401,19 +2404,29 @@ payload_list_generated() {
     echo -e "${YLW}No hay backends cargados.${NC}" >"$O"
     return 0
   fi
-  echo -e "${CYA}Payloads guardados por backend:${NC}" >"$O"
-  local i=0 key url ipport ip port mark
+
+  echo -e "${CYA}Payloads guardados por backend (backend → fecha):${NC}" >"$O"
+  local i=0 key url ipport ip port f ts info
   for line in "${lines[@]}"; do
     i=$((i+1))
     key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*/\1/')"
     url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
     ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
-    mark="NO"
-    [[ -s "${PAYLOAD_GEN_DIR}/${key}.txt" ]] && mark="SI"
-    printf " %3s) %-20s -> %s:%s   guardado:%s\n" "$i" "$key" "$ip" "$port" "$mark" >"$O"
+
+    f="${PAYLOAD_GEN_DIR}/${key}.txt"
+    if [[ -s "$f" ]]; then
+      ts="$(stat -c %Y "$f" 2>/dev/null || echo 0)"
+      ts="$(date -d "@$ts" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "-")"
+      info="${GRN}SI${NC} → ${WHT}${ts}${NC}"
+    else
+      info="${DIM}NO${NC}"
+    fi
+
+    printf " %3s) %-20s -> %s:%s   %s\n" "$i" "$key" "$ip" "$port" "$info" >"$O"
   done
   echo >"$O"
 }
+
 
 payload_view_generated() {
   local O; O="$(payload_out)"
