@@ -56,12 +56,6 @@ TRAFFIC_DB_LAST_RUN="${STATE_DIR}/traffic_last_run"
 BACKEND_META_FILE="${STATE_DIR}/backends.meta"
 
 
-# ------------------ PAYLOADS (clientes) ------------------
-PAYLOAD_HOSTS_FILE="${CFG_DIR}/payload_hosts.txt"
-PAYLOAD_TEMPLATES_FILE="${CFG_DIR}/payload_templates.txt"
-PAYLOAD_LAST_FILE="${STATE_DIR}/last_payload.txt"
-
-
 # ------------------ COLORES ------------------
 NC='[0m'
 RED='[0;31m'
@@ -193,22 +187,6 @@ ensure_files() {
   [[ -f "$NGX_LOGGING_SNIP" ]] || cat > "$NGX_LOGGING_SNIP" <<'EOF'
 log_format backendmgr_stats '$time_local|$remote_addr|$host|$http_backend|$upstream_addr|$status|$body_bytes_sent|$request_time|$upstream_response_time|$request';
 EOF
-  # payload generator files (clientes)
-  [[ -f "$PAYLOAD_HOSTS_FILE" ]] || : > "$PAYLOAD_HOSTS_FILE"
-
-  if [[ ! -f "$PAYLOAD_TEMPLATES_FILE" ]]; then
-    cat > "$PAYLOAD_TEMPLATES_FILE" <<'EOF'
-# id|nombre|plantilla
-1|GET|GET / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][split]OPTION / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROT}[crlf]{HEADER}:{BACKEND} [lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]
-2|ACL|ACL / HTTP/1.1[crlf]Host: recargas.personal.com.ar[crlf][crlf][split]OPTION / HTTP/1.1[crlf]Host: www.personal.com.ar[crlf][crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_RAW}[crlf]{HEADER}:{BACKEND} [lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]
-3|Rotate|[rotate=HEAD;COPY;ACL] / HTTP/1.1[crlf]Host: www.personal.com.ar[crlf][crlf][split]OPTION / HTTP/1.1[crlf]Host: www.personal.com.ar[crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROT}[crlf]{HEADER}:{BACKEND} [lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]
-4|Rotate2|[rotate=ACL;GET;COPY] / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][split]OPTION / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROT}[crlf]{HEADER}:{BACKEND} [lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]
-5|NpvTunel|GET / HTTP/1.1[crlf]Host: recargas.personal.com.ar[crlf][crlf][split]OPTION / HTTP/1.1[crlf]Host: recargas.personal.com.ar[crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROT}[crlf]{HEADER}:{BACKEND}[crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]
-EOF
-  fi
-
-  [[ -f "$PAYLOAD_LAST_FILE" ]] || : > "$PAYLOAD_LAST_FILE"
-
 }
 
 read_cfg() {
@@ -2129,478 +2107,377 @@ backend_delete_expired() {
 
 
 
-# ------------------ PAYLOADS (clientes) ------------------
-payload_editor_cmd() {
-  if [[ -n "${EDITOR:-}" ]] && command -v "${EDITOR}" >/dev/null 2>&1; then
-    echo "${EDITOR}"; return 0
+# ------------------ PAYLOADS (plantillas + generar con backend) ------------------
+PAYLOAD_DIR="${STATE_DIR}/payloads"
+PAYLOAD_INDEX="${PAYLOAD_DIR}/index.db"         # id|nombre
+PAYLOAD_DOMAINS_FILE="${PAYLOAD_DIR}/domains.list"  # override de dominios (uno por línea)
+PAYLOAD_LAST_FILE="${PAYLOAD_DIR}/last_payload.txt"
+
+payload_tpl_file() { echo "${PAYLOAD_DIR}/$1.tpl"; }
+
+payload_init_defaults() {
+  mkdir -p "$PAYLOAD_DIR" >/dev/null 2>&1 || true
+  [[ -f "$PAYLOAD_INDEX" ]] || : > "$PAYLOAD_INDEX"
+
+  def_ok() {
+    local id="$1"
+    grep -qE "^${id}\\|" "$PAYLOAD_INDEX" 2>/dev/null || return 1
+    [[ -f "$(payload_tpl_file "$id")" ]] || return 1
+    return 0
+  }
+
+  add_def() {
+    local id="$1" name="$2"; shift 2
+    local content="$*"
+    grep -qE "^${id}\\|" "$PAYLOAD_INDEX" 2>/dev/null || echo "${id}|${name}" >> "$PAYLOAD_INDEX"
+    [[ -f "$(payload_tpl_file "$id")" ]] || printf "%s\n" "$content" > "$(payload_tpl_file "$id")"
+  }
+
+  # Placeholders soportados:
+  #  {MOTHERS_ROTATE} -> [rotate=dom1;dom2;dom3]
+  #  {MOTHERS_LIST}   -> dom1;dom2;dom3
+  #  {HEADER}         -> header actual (ej Backend)
+  #  {BACKEND}        -> backend elegido
+
+  if ! def_ok 1; then
+    add_def 1 "Payload 1 (GET)" \
+"GET / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][split]
+OPTION / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROTATE}[crlf]{HEADER}:{BACKEND}[lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
   fi
-  for e in nano vim vi; do
-    command -v "$e" >/dev/null 2>&1 && { echo "$e"; return 0; }
-  done
-  echo "vi"
+  if ! def_ok 2; then
+    add_def 2 "Payload 2 (ACL)" \
+"ACL / HTTP/1.1[crlf]Host: recargas.personal.com.ar[crlf][crlf][split]
+OPTION / HTTP/1.1[crlf]Host: www.personal.com.ar[crlf][crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_LIST}[crlf]{HEADER}:{BACKEND}[lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
+  fi
+  if ! def_ok 3; then
+    add_def 3 "Payload 3 (Rotate)" \
+"[rotate=HEAD;COPY;ACL] / HTTP/1.1[crlf]Host: www.personal.com.ar[crlf][crlf][split]
+OPTION / HTTP/1.1[crlf]Host: www.personal.com.ar[crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROTATE}[crlf]{HEADER}:{BACKEND}[lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
+  fi
+  if ! def_ok 4; then
+    add_def 4 "Payload 4 (Rotate2)" \
+"[rotate=ACL;GET;COPY] / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][split]
+OPTION / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROTATE}[crlf]{HEADER}:{BACKEND}[lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
+  fi
+  if ! def_ok 5; then
+    add_def 5 "Payload 5 (NPV Tunnel)" \
+"GET / HTTP/1.1[crlf]Host: recargas.personal.com.ar[crlf][crlf][split]
+OPTION / HTTP/1.1[crlf]Host: recargas.personal.com.ar[crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROTATE}[crlf]{HEADER}:{BACKEND}[crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
+  fi
 }
 
-payload_hosts_derive_from_servers() {
-  local out="" f dom
-  while IFS= read -r f; do
-    [[ -f "$f" ]] || continue
+payload_domains_from_panel() {
+  # dominios desde Dominios madre (servers/*.conf -> server_name)
+  mapfile -t files < <(server_files)
+  local tmp=() f dom d
+  for f in "${files[@]}"; do
     dom="$(grep -E '^\s*server_name\s+' "$f" | head -n1 | sed -E 's/^\s*server_name\s+([^;]+);.*/\1/' || true)"
-    dom="${dom%% *}"
     [[ -z "$dom" ]] && continue
-    if [[ -z "$out" ]]; then out="$dom"; else out="${out};${dom}"; fi
-  done < <(server_files)
+    for d in $dom; do
+      [[ -z "$d" || "$d" == "_" ]] && continue
+      [[ "$d" == *.* ]] || continue
+      tmp+=("$d")
+    done
+  done
+
+  # unique (preserva orden)
+  local out=() seen="" x
+  for x in "${tmp[@]}"; do
+    if [[ " $seen " != *" $x "* ]]; then
+      out+=("$x"); seen+=" $x"
+    fi
+  done
+
+  if [[ ${#out[@]} -eq 0 ]]; then
+    local pd
+    pd="$(primary_domain_active)"
+    [[ "$pd" != "(no configurado)" && "$pd" == *.* ]] && out+=("$pd")
+  fi
+
+  printf '%s\n' "${out[@]}"
+}
+
+payload_get_domains_lines() {
+  if [[ -s "$PAYLOAD_DOMAINS_FILE" ]]; then
+    grep -vE '^\s*$' "$PAYLOAD_DOMAINS_FILE" 2>/dev/null | head -n 50
+  else
+    payload_domains_from_panel
+  fi
+}
+
+payload_domains_join_semicolon() {
+  mapfile -t ds < <(payload_get_domains_lines)
+  local out="" d
+  for d in "${ds[@]}"; do
+    d="${d// /}"
+    [[ -z "$d" ]] && continue
+    if [[ -z "$out" ]]; then out="$d"; else out+=";$d"; fi
+  done
   echo "$out"
 }
 
-payload_hosts_get() {
-  local h=""
-  if [[ -f "$PAYLOAD_HOSTS_FILE" ]]; then
-    h="$(tr -d '\r\n' < "$PAYLOAD_HOSTS_FILE" | sed 's/[[:space:]]//g' || true)"
+payload_domains_rotate() {
+  local list
+  list="$(payload_domains_join_semicolon)"
+  [[ -z "$list" ]] && { echo "[rotate=]"; return 0; }
+  # si hay 1 solo, igual lo envuelvo (mantiene formato)
+  echo "[rotate=${list}]"
+}
+
+payload_list_templates() {
+  payload_init_defaults
+  echo -e "${CYA}Plantillas disponibles:${NC}"
+  if [[ ! -s "$PAYLOAD_INDEX" ]]; then
+    echo -e "${YLW}No hay plantillas.${NC}"; return 0
   fi
-  [[ -z "$h" ]] && h="$(payload_hosts_derive_from_servers)"
-  echo "$h"
-}
-
-payload_hosts_edit() {
-  echo -e "${CYA}Editar lista de Host (dominios madre) para payloads${NC}"
-  echo -e "${DIM}Usá formato con ;  (ej: cpu1.dominio.com;cpu2.dominio.com;cpu3.dominio.com)${NC}\n"
-  mkdir -p "$CFG_DIR" 2>/dev/null || true
-  [[ -f "$PAYLOAD_HOSTS_FILE" ]] || : > "$PAYLOAD_HOSTS_FILE"
-  local ed; ed="$(payload_editor_cmd)"
-  "$ed" "$PAYLOAD_HOSTS_FILE"
-  return 0
-}
-
-payload_hosts_sync_from_servers() {
-  local h
-  h="$(payload_hosts_derive_from_servers)"
-  if [[ -z "$h" ]]; then
-    echo -e "${YLW}No hay dominios madre configurados para copiar.${NC}"
-    return 0
-  fi
-  echo "$h" > "$PAYLOAD_HOSTS_FILE"
-  echo -e "${GRN}✅ Actualizado desde dominios madre:${NC} $h"
-  return 0
-}
-
-payload_templates_edit() {
-  echo -e "${CYA}Editar plantillas de payloads${NC}"
-  echo -e "${DIM}Archivo: ${PAYLOAD_TEMPLATES_FILE}${NC}"
-  mkdir -p "$CFG_DIR" 2>/dev/null || true
-  [[ -f "$PAYLOAD_TEMPLATES_FILE" ]] || : > "$PAYLOAD_TEMPLATES_FILE"
-  local ed; ed="$(payload_editor_cmd)"
-  "$ed" "$PAYLOAD_TEMPLATES_FILE"
-  return 0
-}
-
-payload_templates_list() {
-  echo -e "${CYA}Plantillas disponibles${NC}\n"
-  printf "%-4s %-12s %s\n" "ID" "NOMBRE" "PREVIEW"
-  echo "---------------------------------------------------------------------"
-  awk -F'|' '
-    $0 ~ /^#/ {next}
-    NF>=3 {
-      id=$1; name=$2; tpl=$3;
-      if(length(tpl)>60) tpl=substr(tpl,1,60)"...";
-      printf "%-4s %-12s %s\n", id, name, tpl
-    }' "$PAYLOAD_TEMPLATES_FILE" 2>/dev/null || true
-  return 0
-}
-
-payload_templates_backup() {
-  mkdir -p "$CFG_DIR" 2>/dev/null || true
-  [[ -f "$PAYLOAD_TEMPLATES_FILE" ]] || return 0
-  cp -a "$PAYLOAD_TEMPLATES_FILE" "${PAYLOAD_TEMPLATES_FILE}.bak-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
-}
-
-payload_template_exists() {
-  local id="$1"
-  [[ -f "$PAYLOAD_TEMPLATES_FILE" ]] || return 1
-  awk -F'|' -v id="$id" '$0 !~ /^#/ && $1==id {found=1} END{exit(found?0:1)}' "$PAYLOAD_TEMPLATES_FILE" 2>/dev/null
-}
-
-payload_template_get_line() {
-  local id="$1"
-  awk -F'|' -v id="$id" '$0 !~ /^#/ && $1==id {print; exit}' "$PAYLOAD_TEMPLATES_FILE" 2>/dev/null || true
-}
-
-payload_template_get_field() {
-  local id="$1" field="$2"
-  local line; line="$(payload_template_get_line "$id")"
-  [[ -n "$line" ]] || { echo ""; return 0; }
-  case "$field" in
-    name) echo "$line" | awk -F'|' '{print $2}' ;;
-    tpl)  echo "$line" | awk -F'|' '{print $3}' ;;
-    *) echo "" ;;
-  esac
-}
-
-payload_template_write_or_replace() {
-  local id="$1" name="$2" tpl="$3"
-  mkdir -p "$CFG_DIR" 2>/dev/null || true
-  [[ -f "$PAYLOAD_TEMPLATES_FILE" ]] || : > "$PAYLOAD_TEMPLATES_FILE"
-
-  # evitar separador
-  if [[ "$name" == *"|"* || "$tpl" == *"|"* ]]; then
-    echo -e "${RED}❌ El caracter '|' no está permitido en nombre/plantilla.${NC}"
-    return 0
-  fi
-
-  payload_templates_backup
-
-  local tmp="/tmp/backendmgr.payloads.$$"
-  awk -F'|' -v id="$id" -v newline="$id|$name|$tpl" '
-    BEGIN{found=0}
-    $0 ~ /^#/ {print; next}
-    NF>=3 && $1==id {print newline; found=1; next}
-    {print}
-    END{ if(!found) print newline }
-  ' "$PAYLOAD_TEMPLATES_FILE" 2>/dev/null > "$tmp" || true
-  mv "$tmp" "$PAYLOAD_TEMPLATES_FILE" 2>/dev/null || true
-  return 0
-}
-
-payload_template_next_id() {
-  [[ -f "$PAYLOAD_TEMPLATES_FILE" ]] || { echo "1"; return 0; }
-  awk -F'|' '
-    $0 ~ /^#/ {next}
-    $1 ~ /^[0-9]+$/ { if($1>m) m=$1 }
-    END{ print (m+1) }
-  ' "$PAYLOAD_TEMPLATES_FILE" 2>/dev/null || echo "1"
-}
-
-payload_template_edit_by_id() {
-  [[ -f "$PAYLOAD_TEMPLATES_FILE" ]] || { echo -e "${YLW}No existe ${PAYLOAD_TEMPLATES_FILE}.${NC}"; return 0; }
-
-  payload_templates_list
+  # orden numérico por id
+  while IFS='|' read -r id name; do
+    [[ -z "$id" ]] && continue
+    local first
+    first="$(head -n1 "$(payload_tpl_file "$id")" 2>/dev/null | tr -d '\r')"
+    [[ -z "$first" ]] && first="(vacía)"
+    printf " %3s) %-22s  %s\n" "$id" "$(disp_trunc "$name" 22)" "$(disp_trunc "$first" 38)"
+  done < <(sort -t'|' -k1,1n "$PAYLOAD_INDEX" 2>/dev/null)
   echo
-  read -r -p "ID a editar: " id
-  [[ "$id" =~ ^[0-9]+$ ]] || { echo -e "${YLW}Cancelado.${NC}"; return 0; }
+}
 
-  local old_name old_tpl
-  old_name="$(payload_template_get_field "$id" name)"
-  old_tpl="$(payload_template_get_field "$id" tpl)"
-
-  [[ -n "$old_tpl" ]] || { echo -e "${YLW}No existe ese ID.${NC}"; return 0; }
-
-  echo -e "${DIM}Nombre actual:${NC} $old_name"
-  read -r -p "Nuevo nombre (Enter para mantener): " new_name
-  [[ -z "${new_name:-}" ]] && new_name="$old_name"
-
-  local tmp="/tmp/backendmgr.payload.tpl.$id.$$"
-  printf "%s\n" "$old_tpl" > "$tmp"
-  echo -e "${DIM}Editá la plantilla (ideal: una sola línea). Placeholders: {MOTHERS_ROT} {MOTHERS_RAW} {HEADER} {BACKEND}${NC}"
-  local ed; ed="$(payload_editor_cmd)"
-  "$ed" "$tmp"
-
-  local tpl
-  tpl="$(tr -d '\r' < "$tmp" | awk 'BEGIN{ORS=""}{print $0} END{print ""}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  rm -f "$tmp" 2>/dev/null || true
-
-  [[ -n "$tpl" ]] || { echo -e "${YLW}Sin cambios.${NC}"; return 0; }
-  if [[ "$tpl" == *"|"* ]]; then
-    echo -e "${RED}❌ La plantilla no puede contener '|'.${NC}"
-    return 0
+payload_pick_template_id() {
+  payload_list_templates
+  local id
+  read -r -p "ID de plantilla (Enter=1): " id
+  id="${id:-1}"
+  [[ "$id" =~ ^[0-9]+$ ]] || { echo ""; return 1; }
+  if ! grep -qE "^${id}\\|" "$PAYLOAD_INDEX" 2>/dev/null || [[ ! -f "$(payload_tpl_file "$id")" ]]; then
+    echo -e "${YLW}Plantilla no encontrada.${NC}"
+    return 1
   fi
-
-  payload_template_write_or_replace "$id" "$new_name" "$tpl"
-  echo -e "${GRN}✅ Plantilla actualizada.${NC}"
+  echo "$id"
   return 0
 }
 
-payload_template_add_new() {
-  mkdir -p "$CFG_DIR" 2>/dev/null || true
-  [[ -f "$PAYLOAD_TEMPLATES_FILE" ]] || : > "$PAYLOAD_TEMPLATES_FILE"
-
-  local next; next="$(payload_template_next_id)"
-  echo -e "${CYA}Crear / agregar nueva plantilla${NC}"
-  read -r -p "ID (Enter = auto $next): " id
-  [[ -z "${id:-}" ]] && id="$next"
-  [[ "$id" =~ ^[0-9]+$ ]] || { echo -e "${RED}ID inválido.${NC}"; return 0; }
-
-  local name
-  read -r -p "Nombre (ej: GET2): " name
-  [[ -n "${name:-}" ]] || { echo -e "${RED}Nombre vacío.${NC}"; return 0; }
-  if [[ "$name" == *"|"* ]]; then
-    echo -e "${RED}❌ El nombre no puede contener '|'.${NC}"
-    return 0
-  fi
-
-  if payload_template_exists "$id"; then
-    echo -e "${YLW}Ese ID ya existe. Se reemplazará.${NC}"
-  fi
-
-  local tmp="/tmp/backendmgr.payload.new.$id.$$"
-  cat > "$tmp" <<'EOF'
-# Pegá aquí tu plantilla (ideal: UNA sola línea).
-# Placeholders disponibles:
-#   {MOTHERS_ROT}  -> [rotate=cpu1;cpu2;cpu3]
-#   {MOTHERS_RAW}  -> cpu1;cpu2;cpu3
-#   {HEADER}       -> nombre del header configurado (ej: Backend)
-#   {BACKEND}      -> backend elegido (ej: svpnene38)
-#
-EOF
-
-  local ed; ed="$(payload_editor_cmd)"
-  "$ed" "$tmp"
-
-  local tpl
-  tpl="$(grep -v '^[[:space:]]*#' "$tmp" | tr -d '\r' | awk 'BEGIN{ORS=""}{print $0} END{print ""}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  rm -f "$tmp" 2>/dev/null || true
-
-  [[ -n "$tpl" ]] || { echo -e "${YLW}Cancelado.${NC}"; return 0; }
-  if [[ "$tpl" == *"|"* ]]; then
-    echo -e "${RED}❌ La plantilla no puede contener '|'.${NC}"
-    return 0
-  fi
-
-  payload_template_write_or_replace "$id" "$name" "$tpl"
-  echo -e "${GRN}✅ Plantilla guardada: ID ${id}${NC}"
-  return 0
-}
-
-payload_template_delete_by_id() {
-  [[ -f "$PAYLOAD_TEMPLATES_FILE" ]] || { echo -e "${YLW}No existe ${PAYLOAD_TEMPLATES_FILE}.${NC}"; return 0; }
-
-  payload_templates_list
-  echo
-  read -r -p "ID a eliminar: " id
-  [[ "$id" =~ ^[0-9]+$ ]] || { echo -e "${YLW}Cancelado.${NC}"; return 0; }
-
-  local line; line="$(payload_template_get_line "$id")"
-  [[ -n "$line" ]] || { echo -e "${YLW}No existe ese ID.${NC}"; return 0; }
-
-  echo -e "${YLW}Vas a eliminar:${NC} $line"
-  read -r -p "Confirmar (SI): " ok
-  [[ "${ok:-}" == "SI" ]] || { echo -e "${YLW}Cancelado.${NC}"; return 0; }
-
-  payload_templates_backup
-  local tmp="/tmp/backendmgr.payloads.del.$$"
-  awk -F'|' -v id="$id" '
-    $0 ~ /^#/ {print; next}
-    NF>=3 && $1==id {next}
-    {print}
-  ' "$PAYLOAD_TEMPLATES_FILE" 2>/dev/null > "$tmp" || true
-  mv "$tmp" "$PAYLOAD_TEMPLATES_FILE" 2>/dev/null || true
-  echo -e "${GRN}✅ Eliminado.${NC}"
-  return 0
-}
-
-payload_template_save_last() {
-  if [[ ! -f "$PAYLOAD_LAST_FILE" || ! -s "$PAYLOAD_LAST_FILE" ]]; then
-    echo -e "${YLW}No hay payload generado para guardar.${NC}"
-    return 0
-  fi
-
-  local next; next="$(payload_template_next_id)"
-  echo -e "${CYA}Guardar último payload como plantilla${NC}"
-  read -r -p "ID (Enter = auto $next): " id
-  [[ -z "${id:-}" ]] && id="$next"
-  [[ "$id" =~ ^[0-9]+$ ]] || { echo -e "${RED}ID inválido.${NC}"; return 0; }
-
-  read -r -p "Nombre (ej: CUSTOM): " name
-  [[ -n "${name:-}" ]] || { echo -e "${RED}Nombre vacío.${NC}"; return 0; }
-
-  local tmp="/tmp/backendmgr.payload.last.$$"
-  cp -a "$PAYLOAD_LAST_FILE" "$tmp" 2>/dev/null || true
-  echo -e "${DIM}Podés editarlo antes de guardarlo como plantilla.${NC}"
-  local ed; ed="$(payload_editor_cmd)"
-  "$ed" "$tmp"
-
-  local tpl
-  tpl="$(tr -d '\r' < "$tmp" | awk 'BEGIN{ORS=""}{print $0} END{print ""}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  rm -f "$tmp" 2>/dev/null || true
-
-  [[ -n "$tpl" ]] || { echo -e "${YLW}Cancelado.${NC}"; return 0; }
-  if [[ "$tpl" == *"|"* ]]; then
-    echo -e "${RED}❌ La plantilla no puede contener '|'.${NC}"
-    return 0
-  fi
-
-  payload_template_write_or_replace "$id" "$name" "$tpl"
-  echo -e "${GRN}✅ Guardado como plantilla ID ${id}.${NC}"
-  return 0
-}
-
-payload_last_clear() {
-  mkdir -p "$STATE_DIR" 2>/dev/null || true
-  : > "$PAYLOAD_LAST_FILE" 2>/dev/null || true
-  echo -e "${GRN}✅ Último payload borrado.${NC}"
-  return 0
-}
-
-payload_templates_restore_defaults() {
-  mkdir -p "$CFG_DIR" 2>/dev/null || true
-  [[ -f "$PAYLOAD_TEMPLATES_FILE" ]] || : > "$PAYLOAD_TEMPLATES_FILE"
-
-  echo -e "${YLW}⚠️ Esto restaurará las plantillas 1-5 a sus valores por defecto.${NC}"
-  echo -e "${DIM}Las plantillas con ID distinto a 1-5 se conservarán (se anexan al final).${NC}"
-  read -r -p "Confirmar (SI): " ok
-  [[ "${ok:-}" == "SI" ]] || { echo -e "${YLW}Cancelado.${NC}"; return 0; }
-
-  payload_templates_backup
-
-  local tmp="/tmp/backendmgr.payloads.restore.$$"
-  {
-    echo "# id|nombre|plantilla"
-    echo "1|GET|GET / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][split]OPTION / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROT}[crlf]{HEADER}:{BACKEND} [lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
-    echo "2|ACL|ACL / HTTP/1.1[crlf]Host: recargas.personal.com.ar[crlf][crlf][split]OPTION / HTTP/1.1[crlf]Host: www.personal.com.ar[crlf][crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_RAW}[crlf]{HEADER}:{BACKEND} [lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
-    echo "3|Rotate|[rotate=HEAD;COPY;ACL] / HTTP/1.1[crlf]Host: www.personal.com.ar[crlf][crlf][split]OPTION / HTTP/1.1[crlf]Host: www.personal.com.ar[crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROT}[crlf]{HEADER}:{BACKEND} [lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
-    echo "4|Rotate2|[rotate=ACL;GET;COPY] / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][split]OPTION / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROT}[crlf]{HEADER}:{BACKEND} [lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
-    echo "5|NpvTunel|GET / HTTP/1.1[crlf]Host: recargas.personal.com.ar[crlf][crlf][split]OPTION / HTTP/1.1[crlf]Host: recargas.personal.com.ar[crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROT}[crlf]{HEADER}:{BACKEND}[crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
-    # anexar custom existentes
-    awk -F'|' '
-      $0 ~ /^#/ {next}
-      NF>=3 && $1 ~ /^[0-9]+$/ && ($1<1 || $1>5) {print}
-    ' "$PAYLOAD_TEMPLATES_FILE" 2>/dev/null || true
-  } > "$tmp"
-
-  mv "$tmp" "$PAYLOAD_TEMPLATES_FILE" 2>/dev/null || true
-  echo -e "${GRN}✅ Plantillas restauradas.${NC}"
-  return 0
-}
-
-
-payload_pick_backend() {
+payload_pick_backend_key() {
   mapfile -t lines < <(backend_lines)
-  [[ "${#lines[@]}" -gt 0 ]] || { echo ""; return 0; }
+  if [[ ${#lines[@]} -eq 0 ]]; then
+    echo -e "${YLW}No hay backends cargados.${NC}"
+    return 1
+  fi
 
-  echo -e "${CYA}Elegí backend para el payload${NC}\n"
+  echo -e "${CYA}Elegí el backend para integrar:${NC}"
   local i=0 key url ipport ip port
   for line in "${lines[@]}"; do
     i=$((i+1))
-    key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
+    key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*/\1/')"
     url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
     ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
-    printf "%-3s) %-22s -> %s:%s\n" "$i" "$key" "$ip" "$port"
+    printf " %3s) %-20s -> %s:%s\n" "$i" "$key" "$ip" "$port"
   done
   echo
   read -r -p "Número: " n
-  [[ "$n" =~ ^[0-9]+$ ]] || { echo ""; return 0; }
-  (( n>=1 && n<=${#lines[@]} )) || { echo ""; return 0; }
-  local pick="${lines[$((n-1))]}"
-  key="$(echo "$pick" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
+  [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${YLW}Inválido.${NC}"; return 1; }
+  (( n>=1 && n<=${#lines[@]} )) || { echo -e "${YLW}Fuera de rango.${NC}"; return 1; }
+  key="$(echo "${lines[$((n-1))]}" | sed -E 's/^\s*"([^"]+)".*/\1/')"
   echo "$key"
   return 0
 }
 
-payload_pick_template() {
-  echo -e "${CYA}Elegí tipo de payload${NC}\n"
-  awk -F'|' '
-    $0 ~ /^#/ {next}
-    NF>=3 { printf " %s) %s\n", $1, $2 }
-  ' "$PAYLOAD_TEMPLATES_FILE" 2>/dev/null || true
-  echo
-  read -r -p "ID de plantilla (ej: 1): " pid
-  [[ "$pid" =~ ^[0-9]+$ ]] || { echo ""; return 0; }
-  local tpl
-  tpl="$(awk -F'|' -v id="$pid" '$0 !~ /^#/ && $1==id {print $3; exit}' "$PAYLOAD_TEMPLATES_FILE" 2>/dev/null || true)"
-  [[ -n "$tpl" ]] || { echo ""; return 0; }
-  echo "$pid"
-  return 0
+payload_render() {
+  local tpl="$1" backend="$2"
+  local hdr="$HEADER_NAME"
+  local dom_list dom_rot
+  dom_list="$(payload_domains_join_semicolon)"
+  dom_rot="$(payload_domains_rotate)"
+
+  # reemplazos por placeholders
+  local out
+  out="$(printf "%s" "$tpl" | sed \
+    -e "s/{HEADER}/${hdr}/g" \
+    -e "s/{BACKEND}/${backend}/g" \
+    -e "s/{MOTHERS_LIST}/${dom_list}/g" \
+    -e "s/{MOTHERS_ROTATE}/${dom_rot}/g")"
+
+  # compat: si el usuario dejó puntos suspensivos
+  out="$(printf "%s" "$out" | sed -E \
+    -e "s/(${hdr}|Backend):[[:space:]]*\.+/\\1:${backend}/g" \
+    -e "s/(${hdr}|Backend):[[:space:]]*\.{2,}/\\1:${backend}/g")"
+
+  printf "%s\n" "$out"
 }
 
 payload_generate() {
-  read_cfg 2>/dev/null || true
+  payload_init_defaults
+  echo -e "${CYA}Generar payload${NC}"
+  echo -e "${DIM}Primero elegís la plantilla, luego el backend de tu lista.${NC}\n"
 
-  [[ -f "$PAYLOAD_TEMPLATES_FILE" ]] || { echo -e "${YLW}No existe ${PAYLOAD_TEMPLATES_FILE}.${NC}"; return 0; }
+  local tid backend tpl out
+  tid="$(payload_pick_template_id)" || return 0
+  backend="$(payload_pick_backend_key)" || return 0
+  tpl="$(cat "$(payload_tpl_file "$tid")" 2>/dev/null || true)"
+  [[ -z "$tpl" ]] && { echo -e "${YLW}Plantilla vacía.${NC}"; return 0; }
 
-  local pid backend hosts tpl
-  pid="$(payload_pick_template)"
-  [[ -n "$pid" ]] || { echo -e "${YLW}Cancelado.${NC}"; return 0; }
-
-  backend="$(payload_pick_backend)"
-  [[ -n "$backend" ]] || { echo -e "${YLW}No seleccionaste backend.${NC}"; return 0; }
-
-  hosts="$(payload_hosts_get)"
-  if [[ -z "$hosts" ]]; then
-    echo -e "${YLW}No hay lista de dominios madre para payload.${NC}"
-    read -r -p "Ingresá dominios separados por ; : " hosts
-    hosts="$(echo "$hosts" | sed 's/[[:space:]]//g')"
-    [[ -z "$hosts" ]] && { echo -e "${YLW}Cancelado.${NC}"; return 0; }
-    echo "$hosts" > "$PAYLOAD_HOSTS_FILE"
-  fi
-
-  tpl="$(awk -F'|' -v id="$pid" '$0 !~ /^#/ && $1==id {print $3; exit}' "$PAYLOAD_TEMPLATES_FILE" 2>/dev/null || true)"
-  [[ -n "$tpl" ]] || { echo -e "${YLW}Plantilla no encontrada.${NC}"; return 0; }
-
-  local mothers_raw mothers_rot
-  mothers_raw="$hosts"
-  mothers_rot="[rotate=${hosts}]"
-
-  local out="$tpl"
-  out="${out//\{HEADER\}/${HEADER_NAME}}"
-  out="${out//\{BACKEND\}/${backend}}"
-  out="${out//\{MOTHERS_RAW\}/${mothers_raw}}"
-  out="${out//\{MOTHERS_ROT\}/${mothers_rot}}"
-
-  echo -e "${GRN}✅ Payload generado:${NC}\n"
-  echo "---------------------------------------------------------------------"
+  echo
+  echo -e "${GRN}✅ Payload generado:${NC}"
+  echo "--------------------------------------------------------------"
+  out="$(payload_render "$tpl" "$backend")"
   echo "$out"
-  echo "---------------------------------------------------------------------"
-  echo
+  echo "--------------------------------------------------------------"
 
-  # guardar último payload
-  mkdir -p "$STATE_DIR" 2>/dev/null || true
-  echo "$out" > "$PAYLOAD_LAST_FILE" 2>/dev/null || true
+  mkdir -p "$PAYLOAD_DIR" >/dev/null 2>&1 || true
+  printf "%s\n" "$out" > "$PAYLOAD_LAST_FILE" 2>/dev/null || true
 
-  echo -e "${DIM}Guardado en:${NC} $PAYLOAD_LAST_FILE"
-  echo -e "${DIM}Tip:${NC} copialo y pegalo en tu app cliente."
+  echo -e "${DIM}Tip:${NC} Copiá el bloque completo y enviáselo al cliente."
   return 0
 }
 
-payload_last_show() {
-  if [[ ! -f "$PAYLOAD_LAST_FILE" || ! -s "$PAYLOAD_LAST_FILE" ]]; then
-    echo -e "${YLW}No hay payload guardado todavía.${NC}"
-    return 0
-  fi
-  echo -e "${CYA}Último payload generado:${NC}\n"
-  echo "---------------------------------------------------------------------"
-  cat "$PAYLOAD_LAST_FILE"
-  echo
-  echo "---------------------------------------------------------------------"
-  return 0
-}
-
-payload_menu() {
+payload_domains_menu() {
+  payload_init_defaults
   while true; do
-    echo -e "${WHT}📦 Payloads (para clientes)${NC}"
-    echo -e "${DIM}Generar payload eligiendo backend + lista de dominios madre.${NC}\n"
-    echo "1) 🧾 Generar payload (elige plantilla + backend)"
-    echo "2) 🧩 Editar Host (dominios madre) para payloads"
-    echo "3) 🔄 Actualizar Host desde dominios madre del panel"
-    echo "4) ✏️  Editar archivo de plantillas (avanzado)"
-    echo "5) 📋 Ver plantillas actuales"
-    echo "6) 📝 Ver último payload generado"
-    echo "7) ✍️  Editar una plantilla por ID"
-    echo "8) ➕ Crear / Agregar nueva plantilla"
-    echo "9) 🗑️  Eliminar plantilla por ID"
-    echo "10) 💾 Guardar último payload como plantilla"
-    echo "11) 🧽 Borrar último payload generado"
-    echo "12) ♻️  Restaurar plantillas por defecto (1-5)"
+    echo -e "${WHT}🌐 Dominios para Host (payload)${NC}"
+    echo -e "${DIM}Se usan para {MOTHERS_ROTATE} y {MOTHERS_LIST}.\nSi no seteás override, toma los dominios de servers/*.conf.${NC}\n"
+
+    local current
+    current="$(payload_domains_join_semicolon)"
+    [[ -z "$current" ]] && current="(sin dominios)"
+    echo -e "Actual: ${GRN}${current}${NC}\n"
+
+    echo "1) ✏️  Editar manual (ingresar lista)"
+    echo "2) 🔄 Sincronizar desde Dominios madre (servers)"
+    echo "3) 🧹 Quitar override (volver a automático)"
     echo "0) Volver"
-    echo
     read -r -p "Opción: " op
     echo
     case "$op" in
-      1) payload_generate; pause ;;
-      2) payload_hosts_edit; pause ;;
-      3) payload_hosts_sync_from_servers; pause ;;
-      4) payload_templates_edit; pause ;;
-      5) payload_templates_list; pause ;;
-      6) payload_last_show; pause ;;
-      7) payload_template_edit_by_id; pause ;;
-      8) payload_template_add_new; pause ;;
-      9) payload_template_delete_by_id; pause ;;
-      10) payload_template_save_last; pause ;;
-      11) payload_last_clear; pause ;;
-      12) payload_templates_restore_defaults; pause ;;
+      1)
+        echo -e "${DIM}Pegá dominios separados por ;  (ej: cpu1.x.com;cpu2.x.com;cpu3.x.com)${NC}"
+        read -r -p "Dominios: " line
+        mkdir -p "$PAYLOAD_DIR" >/dev/null 2>&1 || true
+        : > "$PAYLOAD_DOMAINS_FILE"
+        IFS=";" read -r -a parts <<< "$line"
+        for part in "${parts[@]}"; do
+          part="${part// /}"
+          [[ -z "$part" ]] && continue
+          echo "$part" >> "$PAYLOAD_DOMAINS_FILE"
+        done
+        echo -e "${GRN}✅ Guardado.${NC}"; pause
+        ;;
+      2)
+        mkdir -p "$PAYLOAD_DIR" >/dev/null 2>&1 || true
+        : > "$PAYLOAD_DOMAINS_FILE"
+        payload_domains_from_panel >> "$PAYLOAD_DOMAINS_FILE" 2>/dev/null || true
+        echo -e "${GRN}✅ Sincronizado.${NC}"; pause ;;
+      3)
+        rm -f "$PAYLOAD_DOMAINS_FILE" 2>/dev/null || true
+        echo -e "${GRN}✅ Override eliminado.${NC}"; pause ;;
       0) return 0 ;;
       *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
     esac
   done
 }
 
+payload_template_edit() {
+  payload_init_defaults
+  payload_list_templates
+  local id
+  read -r -p "ID a editar: " id
+  [[ "$id" =~ ^[0-9]+$ ]] || { echo -e "${YLW}Inválido.${NC}"; return 0; }
+  [[ -f "$(payload_tpl_file "$id")" ]] || { echo -e "${YLW}Plantilla no encontrada.${NC}"; return 0; }
+
+  echo -e "${DIM}Contenido actual:${NC}"
+  echo "--------------------------------------------------------------"
+  cat "$(payload_tpl_file "$id")" 2>/dev/null || true
+  echo "--------------------------------------------------------------"
+  echo -e "${DIM}Pegá el nuevo contenido. Finalizá con una línea sola que diga: END${NC}"
+
+  local tmp
+  tmp="$(mktemp)"
+  while IFS= read -r line; do
+    [[ "$line" == "END" ]] && break
+    printf "%s\n" "$line" >> "$tmp"
+  done
+
+  if [[ ! -s "$tmp" ]]; then
+    rm -f "$tmp" 2>/dev/null || true
+    echo -e "${YLW}No se guardó (vacío).${NC}"
+    return 0
+  fi
+
+  mv "$tmp" "$(payload_tpl_file "$id")"
+  echo -e "${GRN}✅ Plantilla actualizada.${NC}"
+}
+
+payload_template_add() {
+  payload_init_defaults
+  local name
+  read -r -p "Nombre (ej: Personal Pro): " name
+  name="${name:-Custom}"
+
+  local next
+  next="$(awk -F'|' '($1 ~ /^[0-9]+$/){if($1>m)m=$1} END{print m+1}' "$PAYLOAD_INDEX" 2>/dev/null)"
+  [[ -z "$next" ]] && next=6
+
+  echo -e "${DIM}Pegá el contenido del payload. Usá {HEADER} {BACKEND} {MOTHERS_ROTATE} {MOTHERS_LIST}.\nFinalizá con una línea sola: END${NC}"
+  local tmp
+  tmp="$(mktemp)"
+  while IFS= read -r line; do
+    [[ "$line" == "END" ]] && break
+    printf "%s\n" "$line" >> "$tmp"
+  done
+
+  if [[ ! -s "$tmp" ]]; then
+    rm -f "$tmp" 2>/dev/null || true
+    echo -e "${YLW}No se creó (vacío).${NC}"
+    return 0
+  fi
+
+  mkdir -p "$PAYLOAD_DIR" >/dev/null 2>&1 || true
+  echo "${next}|${name}" >> "$PAYLOAD_INDEX"
+  mv "$tmp" "$(payload_tpl_file "$next")"
+  echo -e "${GRN}✅ Creado:${NC} ID ${next}"
+}
+
+payload_template_delete() {
+  payload_init_defaults
+  payload_list_templates
+  local id
+  read -r -p "ID a eliminar: " id
+  [[ "$id" =~ ^[0-9]+$ ]] || { echo -e "${YLW}Inválido.${NC}"; return 0; }
+  grep -qE "^${id}\\|" "$PAYLOAD_INDEX" 2>/dev/null || { echo -e "${YLW}No existe.${NC}"; return 0; }
+  read -r -p "Seguro? (s/N): " yn
+  [[ "$yn" =~ ^[sS]$ ]] || { echo -e "${DIM}Cancelado.${NC}"; return 0; }
+
+  awk -F'|' -v id="$id" 'BEGIN{OFS="|"} $1!=id{print}' "$PAYLOAD_INDEX" > "${PAYLOAD_INDEX}.tmp" 2>/dev/null || true
+  mv "${PAYLOAD_INDEX}.tmp" "$PAYLOAD_INDEX" 2>/dev/null || true
+  rm -f "$(payload_tpl_file "$id")" 2>/dev/null || true
+  echo -e "${GRN}✅ Eliminado.${NC}"
+}
+
+payload_menu() {
+  payload_init_defaults
+  while true; do
+    echo -e "${WHT}🧾 Payloads${NC}"
+    echo -e "${DIM}Generá payload eligiendo plantilla + backend. Las plantillas se pueden editar/crear.${NC}\n"
+    echo "1) 🧾 Generar payload (plantilla + backend)"
+    echo "2) 📋 Ver plantillas"
+    echo "3) ✏️  Editar plantilla"
+    echo "4) ➕ Agregar nueva plantilla"
+    echo "5) 🗑️  Eliminar plantilla"
+    echo "6) 🌐 Dominios Host (rotación/lista)"
+    echo "7) 👁️  Ver último payload generado"
+    echo "0) Volver"
+    read -r -p "Opción: " op
+    echo
+    case "$op" in
+      1) payload_generate; pause ;;
+      2) payload_list_templates; pause ;;
+      3) payload_template_edit; pause ;;
+      4) payload_template_add; pause ;;
+      5) payload_template_delete; pause ;;
+      6) payload_domains_menu ;;
+      7) [[ -f "$PAYLOAD_LAST_FILE" ]] && cat "$PAYLOAD_LAST_FILE" || echo "(nada aún)"; pause ;;
+      0) return 0 ;;
+      *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
+    esac
+  done
+}
 add_backend_menu() {
   while true; do
     echo -e "${WHT}➕ Gestión de Backends${NC}"
@@ -2611,7 +2488,7 @@ add_backend_menu() {
     echo "4) ➕ Sumar días a un backend"
     echo "5) 🗑️  Eliminar backend (manual)"
     echo "6) 🧹 Eliminar expirados"
-    echo "7) 🧾 Payloads (generar/editar)"
+    echo "7) 🧾 Payloads (generar / administrar)"
     echo "0) Volver"
     echo
     read -r -p "Opción: " o
@@ -3667,10 +3544,10 @@ uninstall_backendmgr(){
 
 # ------------------ MENU ------------------
 menu() {
-  echo -e "${BLU}==============================================================${NC}"
+  echo -e "${BLU}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
   echo -e "${WHT}📌 MENÚ PRINCIPAL${NC}"
   echo -e "${DIM}Elegí una opción (número) y Enter.${NC}"
-  echo -e "${BLU}--------------------------------------------------------------${NC}"
+  echo -e "${BLU}──────────────────────────────────────────────────────────────${NC}"
   echo
   echo -e "${BCYA}[01]${NC} 🌐 Dominios madre (crear / editar / eliminar)"
   echo -e "${BCYA}[02]${NC} ➕ Agregar backend (rápido: nombre + IP + puerto)"
@@ -3689,9 +3566,9 @@ menu() {
   echo -e "${BCYA}[17]${NC} 🧰 Mantenimiento programado (RAM / Nginx timers)"
   echo -e "${BCYA}[18]${NC} 🗑️  Desinstalar Backend Manager"
   echo
-  echo -e "${BLU}--------------------------------------------------------------${NC}"
+  echo -e "${BLU}──────────────────────────────────────────────────────────────${NC}"
   echo -e "${BCYA}[00]${NC} 🚪 Salir"
-  echo -e "${BLU}==============================================================${NC}"
+  echo -e "${BLU}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
   echo
 }
 
