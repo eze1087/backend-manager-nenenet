@@ -731,10 +731,6 @@ banner() {
   __banner_kv "$nl"
   __banner_kv "$rl"
 
-  # Timers
-
-  printf "${DIM}${WHT}  %s${NC}
-" "$(strip_ansi "$(ramrefresh_last_line)")"
 
   printf "${BBLU}%s${NC}
 " "$SEP_THIN"
