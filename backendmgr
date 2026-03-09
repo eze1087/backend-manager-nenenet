@@ -704,16 +704,35 @@ banner() {
 " "$SEP_THICK"
 
   # Recursos (mismo contenido, distinto tono para separarlo del menú)
-  printf "${DIM}${WHT}  %s${NC}
-" "$(strip_ansi "$(disk_usage_line)" | sed 's/^💽 DISK: /💽 DISCO: /')"
-  printf "${DIM}${WHT}  %s${NC}
-" "$(strip_ansi "$(mem_used_line)" | sed 's/^🧠 RAM: /🧠 RAM: /')"
-  printf "${DIM}${WHT}  %s${NC}
-" "$(strip_ansi "$(cpu_line)")"
-  printf "${DIM}${WHT}  %s${NC}
-" "$(strip_ansi "$(net_totals_line)" | sed 's/^📡 NET: /📡 RED: /')"
+  local dl ml cl nl rl
+  dl="$(strip_ansi "$(disk_usage_line)" | sed 's/^💽 DISK: /💽 DISCO: /')"
+  ml="$(strip_ansi "$(mem_used_line)")"
+  cl="$(strip_ansi "$(cpu_line)")"
+  nl="$(strip_ansi "$(net_totals_line)" | sed 's/^📡 NET: /📡 RED: /')"
+  rl="$(strip_ansi "$(ramrefresh_last_line)")"
+
+  __banner_kv() {
+    local s="$1" label rest
+    label="${s%%:*}"
+    rest="${s#*:}"
+    if [[ "$rest" == "$s" ]]; then
+      printf "  ${BCYA}%s${NC}
+" "$s"
+    else
+      rest="${rest# }"
+      printf "  ${BCYA}%s:${NC} ${WHT}%s${NC}
+" "$label" "$rest"
+    fi
+  }
+
+  __banner_kv "$dl"
+  __banner_kv "$ml"
+  __banner_kv "$cl"
+  __banner_kv "$nl"
+  __banner_kv "$rl"
 
   # Timers
+
   printf "${DIM}${WHT}  %s${NC}
 " "$(strip_ansi "$(ramrefresh_last_line)")"
 
@@ -2122,7 +2141,7 @@ payload_init_defaults() {
   def_ok() {
     local id="$1"
     grep -qE "^${id}\\|" "$PAYLOAD_INDEX" 2>/dev/null || return 1
-    [[ -f "$(payload_tpl_file "$id")" ]] || return 1
+    [[ -s "$(payload_tpl_file "$id")" ]] || return 1
     return 0
   }
 
@@ -2130,7 +2149,8 @@ payload_init_defaults() {
     local id="$1" name="$2"; shift 2
     local content="$*"
     grep -qE "^${id}\\|" "$PAYLOAD_INDEX" 2>/dev/null || echo "${id}|${name}" >> "$PAYLOAD_INDEX"
-    [[ -f "$(payload_tpl_file "$id")" ]] || printf "%s\n" "$content" > "$(payload_tpl_file "$id")"
+    [[ -s "$(payload_tpl_file "$id")" ]] || printf "%s
+" "$content" > "$(payload_tpl_file "$id")"
   }
 
   # Placeholders soportados:
@@ -2224,70 +2244,118 @@ payload_domains_rotate() {
   echo "[rotate=${list}]"
 }
 
+payload_out() {
+  # Evita que la UI se "coma" listas por culpa de $(...) capturando stdout
+  if [[ -w /dev/tty ]]; then
+    echo "/dev/tty"
+  else
+    echo "/dev/stderr"
+  fi
+}
+
 payload_list_templates() {
   payload_init_defaults
-  echo -e "${CYA}Plantillas disponibles:${NC}"
+  local O; O="$(payload_out)"
+  echo -e "${CYA}Plantillas disponibles:${NC}" >"$O"
   if [[ ! -s "$PAYLOAD_INDEX" ]]; then
-    echo -e "${YLW}No hay plantillas.${NC}"; return 0
+    echo -e "${YLW}No hay plantillas.${NC}" >"$O"
+    return 0
   fi
-  # orden numérico por id
   while IFS='|' read -r id name; do
     [[ -z "$id" ]] && continue
     local first
     first="$(head -n1 "$(payload_tpl_file "$id")" 2>/dev/null | tr -d '\r')"
     [[ -z "$first" ]] && first="(vacía)"
-    printf " %3s) %-22s  %s\n" "$id" "$(disp_trunc "$name" 22)" "$(disp_trunc "$first" 38)"
+    printf " %3s) %-22s  %s\n" "$id" "$(disp_trunc "$name" 22)" "$(disp_trunc "$first" 38)" >"$O"
   done < <(sort -t'|' -k1,1n "$PAYLOAD_INDEX" 2>/dev/null)
-  echo
+  echo >"$O"
 }
 
 payload_pick_template_id() {
+  # Usage:
+  #   payload_pick_template_id VAR   -> guarda el ID en VAR (recomendado)
+  #   payload_pick_template_id       -> imprime el ID por stdout (legacy)
   payload_list_templates
-  local id
-  read -r -p "ID de plantilla (Enter=1): " id
+  local __var="${1:-}"
+  local id O; O="$(payload_out)"
+  if [[ -r /dev/tty ]]; then
+    read -r -p "ID de plantilla (Enter=1): " id </dev/tty
+  else
+    read -r -p "ID de plantilla (Enter=1): " id
+  fi
   id="${id:-1}"
-  [[ "$id" =~ ^[0-9]+$ ]] || { echo ""; return 1; }
-  if ! grep -qE "^${id}\\|" "$PAYLOAD_INDEX" 2>/dev/null || [[ ! -f "$(payload_tpl_file "$id")" ]]; then
-    echo -e "${YLW}Plantilla no encontrada.${NC}"
+  [[ "$id" =~ ^[0-9]+$ ]] || { echo -e "${YLW}ID inválido.${NC}" >"$O"; return 1; }
+  if ! grep -qE "^${id}\|" "$PAYLOAD_INDEX" 2>/dev/null || [[ ! -s "$(payload_tpl_file "$id")" ]]; then
+    echo -e "${YLW}Plantilla no encontrada o vacía.${NC}" >"$O"
     return 1
   fi
-  echo "$id"
+  if [[ -n "$__var" ]]; then
+    printf -v "$__var" "%s" "$id"
+  else
+    echo "$id"
+  fi
   return 0
 }
 
 payload_pick_backend_key() {
+  # Usage:
+  #   payload_pick_backend_key VAR   -> guarda el backend en VAR (recomendado)
+  #   payload_pick_backend_key       -> imprime el backend por stdout (legacy)
+  local __var="${1:-}"
   mapfile -t lines < <(backend_lines)
+  local O; O="$(payload_out)"
   if [[ ${#lines[@]} -eq 0 ]]; then
-    echo -e "${YLW}No hay backends cargados.${NC}"
+    echo -e "${YLW}No hay backends cargados.${NC}" >"$O"
     return 1
   fi
 
-  echo -e "${CYA}Elegí el backend para integrar:${NC}"
+  echo -e "${CYA}Elegí de la siguiente lista el backend a integrar:${NC}" >"$O"
+  echo -e "${DIM}Seleccioná por número.${NC}" >"$O"
+  echo "----------------------------------------------------------------" >"$O"
+
   local i=0 key url ipport ip port
   for line in "${lines[@]}"; do
     i=$((i+1))
     key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*/\1/')"
     url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
     ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
-    printf " %3s) %-20s -> %s:%s\n" "$i" "$key" "$ip" "$port"
+    printf " %3s) %-20s -> %s:%s\n" "$i" "$key" "$ip" "$port" >"$O"
   done
-  echo
-  read -r -p "Número: " n
-  [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${YLW}Inválido.${NC}"; return 1; }
-  (( n>=1 && n<=${#lines[@]} )) || { echo -e "${YLW}Fuera de rango.${NC}"; return 1; }
+  echo "----------------------------------------------------------------" >"$O"
+
+  local n
+  if [[ -r /dev/tty ]]; then
+    read -r -p "Número: " n </dev/tty
+  else
+    read -r -p "Número: " n
+  fi
+  [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${YLW}Inválido.${NC}" >"$O"; return 1; }
+  (( n>=1 && n<=${#lines[@]} )) || { echo -e "${YLW}Fuera de rango.${NC}" >"$O"; return 1; }
+
   key="$(echo "${lines[$((n-1))]}" | sed -E 's/^\s*"([^"]+)".*/\1/')"
-  echo "$key"
+  if [[ -n "$__var" ]]; then
+    printf -v "$__var" "%s" "$key"
+  else
+    echo "$key"
+  fi
   return 0
 }
 
 payload_render() {
   local tpl="$1" backend="$2"
+  local dom_list_override="${3:-}"
+  local dom_rot_override="${4:-}"
   local hdr="$HEADER_NAME"
-  local dom_list dom_rot
-  dom_list="$(payload_domains_join_semicolon)"
-  dom_rot="$(payload_domains_rotate)"
 
-  # reemplazos por placeholders
+  local dom_list dom_rot
+  if [[ -n "$dom_list_override" ]]; then
+    dom_list="$dom_list_override"
+    dom_rot="${dom_rot_override:-[rotate=${dom_list_override}]}"
+  else
+    dom_list="$(payload_domains_join_semicolon)"
+    dom_rot="$(payload_domains_rotate)"
+  fi
+
   local out
   out="$(printf "%s" "$tpl" | sed \
     -e "s/{HEADER}/${hdr}/g" \
@@ -2295,7 +2363,6 @@ payload_render() {
     -e "s/{MOTHERS_LIST}/${dom_list}/g" \
     -e "s/{MOTHERS_ROTATE}/${dom_rot}/g")"
 
-  # compat: si el usuario dejó puntos suspensivos
   out="$(printf "%s" "$out" | sed -E \
     -e "s/(${hdr}|Backend):[[:space:]]*\.+/\\1:${backend}/g" \
     -e "s/(${hdr}|Backend):[[:space:]]*\.{2,}/\\1:${backend}/g")"
@@ -2303,28 +2370,184 @@ payload_render() {
   printf "%s\n" "$out"
 }
 
+PAYLOAD_GEN_DIR="${PAYLOAD_DIR}/generated"
+PAYLOAD_GEN_INDEX="${PAYLOAD_DIR}/generated.index"   # backend|template|ts|domains_mode|domains_list
+
+payload_save_generated() {
+  local backend="$1" tid="$2" domains_mode="$3" domains_list="$4" payload="$5"
+  mkdir -p "$PAYLOAD_GEN_DIR" >/dev/null 2>&1 || true
+  printf "%s\n" "$payload" > "${PAYLOAD_GEN_DIR}/${backend}.txt" 2>/dev/null || true
+
+  [[ -f "$PAYLOAD_GEN_INDEX" ]] || : > "$PAYLOAD_GEN_INDEX"
+  local ts; ts="$(date +%s)"
+  awk -F'|' -v b="$backend" 'BEGIN{OFS="|"} $1!=b{print}' "$PAYLOAD_GEN_INDEX" 2>/dev/null > "${PAYLOAD_GEN_INDEX}.tmp" || true
+  printf "%s|%s|%s|%s|%s\n" "$backend" "$tid" "$ts" "$domains_mode" "$domains_list" >> "${PAYLOAD_GEN_INDEX}.tmp"
+  mv "${PAYLOAD_GEN_INDEX}.tmp" "$PAYLOAD_GEN_INDEX" 2>/dev/null || true
+}
+
+payload_list_generated() {
+  local O; O="$(payload_out)"
+  mapfile -t lines < <(backend_lines)
+  if [[ ${#lines[@]} -eq 0 ]]; then
+    echo -e "${YLW}No hay backends cargados.${NC}" >"$O"
+    return 0
+  fi
+  echo -e "${CYA}Payloads guardados por backend:${NC}" >"$O"
+  local i=0 key url ipport ip port mark
+  for line in "${lines[@]}"; do
+    i=$((i+1))
+    key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*/\1/')"
+    url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
+    ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
+    mark="NO"
+    [[ -s "${PAYLOAD_GEN_DIR}/${key}.txt" ]] && mark="SI"
+    printf " %3s) %-20s -> %s:%s   guardado:%s\n" "$i" "$key" "$ip" "$port" "$mark" >"$O"
+  done
+  echo >"$O"
+}
+
+payload_view_generated() {
+  local O; O="$(payload_out)"
+  payload_list_generated
+  local n
+  if [[ -r /dev/tty ]]; then
+    read -r -p "Número de backend: " n </dev/tty
+  else
+    read -r -p "Número de backend: " n
+  fi
+  [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${YLW}Inválido.${NC}" >"$O"; return 0; }
+  mapfile -t lines < <(backend_lines)
+  (( n>=1 && n<=${#lines[@]} )) || { echo -e "${YLW}Fuera de rango.${NC}" >"$O"; return 0; }
+  local key
+  key="$(echo "${lines[$((n-1))]}" | sed -E 's/^\s*"([^"]+)".*/\1/')"
+  if [[ ! -s "${PAYLOAD_GEN_DIR}/${key}.txt" ]]; then
+    echo -e "${YLW}Ese backend no tiene payload guardado.${NC}" >"$O"
+    return 0
+  fi
+  echo -e "${GRN}✅ Payload guardado para:${NC} $key" >"$O"
+  echo "--------------------------------------------------------------" >"$O"
+  cat "${PAYLOAD_GEN_DIR}/${key}.txt" >"$O"
+  echo "--------------------------------------------------------------" >"$O"
+}
+
+payload_delete_generated() {
+  local O; O="$(payload_out)"
+  payload_list_generated
+  local n
+  if [[ -r /dev/tty ]]; then
+    read -r -p "Número de backend a borrar payload: " n </dev/tty
+  else
+    read -r -p "Número de backend a borrar payload: " n
+  fi
+  [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${YLW}Inválido.${NC}" >"$O"; return 0; }
+  mapfile -t lines < <(backend_lines)
+  (( n>=1 && n<=${#lines[@]} )) || { echo -e "${YLW}Fuera de rango.${NC}" >"$O"; return 0; }
+  local key
+  key="$(echo "${lines[$((n-1))]}" | sed -E 's/^\s*"([^"]+)".*/\1/')"
+  rm -f "${PAYLOAD_GEN_DIR}/${key}.txt" 2>/dev/null || true
+  awk -F'|' -v b="$key" 'BEGIN{OFS="|"} $1!=b{print}' "$PAYLOAD_GEN_INDEX" 2>/dev/null > "${PAYLOAD_GEN_INDEX}.tmp" || true
+  mv "${PAYLOAD_GEN_INDEX}.tmp" "$PAYLOAD_GEN_INDEX" 2>/dev/null || true
+  echo -e "${GRN}✅ Payload borrado para:${NC} $key" >"$O"
+}
+
 payload_generate() {
   payload_init_defaults
-  echo -e "${CYA}Generar payload${NC}"
-  echo -e "${DIM}Primero elegís la plantilla, luego el backend de tu lista.${NC}\n"
+  local O; O="$(payload_out)"
+  echo -e "${CYA}Generar payload${NC}" >"$O"
+  echo -e "${DIM}Primero elegís la plantilla, luego el backend de tu lista.${NC}\n" >"$O"
 
-  local tid backend tpl out
-  tid="$(payload_pick_template_id)" || return 0
-  backend="$(payload_pick_backend_key)" || return 0
+  local tid backend tpl out dom_choice dom_list dom_rot domains_mode
+
+  # 1) Plantilla (muestra lista y selecciona)
+  if ! payload_pick_template_id tid; then
+    return 0
+  fi
+
+  # Validar plantilla ANTES de pedir backend (evita confusión)
   tpl="$(cat "$(payload_tpl_file "$tid")" 2>/dev/null || true)"
-  [[ -z "$tpl" ]] && { echo -e "${YLW}Plantilla vacía.${NC}"; return 0; }
+  if [[ -z "${tpl//[[:space:]]/}" ]]; then
+    echo -e "${YLW}Plantilla vacía.${NC}" >"$O"
+    return 0
+  fi
 
-  echo
-  echo -e "${GRN}✅ Payload generado:${NC}"
-  echo "--------------------------------------------------------------"
-  out="$(payload_render "$tpl" "$backend")"
-  echo "$out"
-  echo "--------------------------------------------------------------"
+  # 2) Backend (muestra lista y selecciona)
+  if ! payload_pick_backend_key backend; then
+    return 0
+  fi
+
+  # 3) Dominios madre
+  local current_auto current_override
+  current_auto="$(payload_domains_from_panel | paste -sd';' -)"
+  current_override=""
+  if [[ -s "$PAYLOAD_DOMAINS_FILE" ]]; then
+    current_override="$(payload_domains_join_semicolon)"
+  fi
+  [[ -z "$current_auto" ]] && current_auto="(no configurado)"
+  [[ -z "$current_override" ]] && current_override="(no override)"
+
+  echo -e "\n${CYA}Dominios madre para Host:${NC}" >"$O"
+  echo -e "${DIM}1) Usar dominios del panel (Dominios madre)\n2) Usar override guardado (si existe)\n3) Manual (solo este payload)\n4) Manual y guardar override${NC}\n" >"$O"
+  echo -e "Auto: ${GRN}${current_auto}${NC}" >"$O"
+  echo -e "Override: ${GRN}${current_override}${NC}\n" >"$O"
+
+  if [[ -r /dev/tty ]]; then
+    read -r -p "Opción (1-4) [1]: " dom_choice </dev/tty
+  else
+    read -r -p "Opción (1-4) [1]: " dom_choice
+  fi
+  dom_choice="${dom_choice:-1}"
+
+  case "$dom_choice" in
+    2)
+      domains_mode="override"
+      dom_list="$(payload_domains_join_semicolon)"
+      [[ -z "$dom_list" ]] && { domains_mode="auto"; dom_list="$(payload_domains_from_panel | paste -sd';' -)"; }
+      ;;
+    3|4)
+      if [[ -r /dev/tty ]]; then
+        read -r -p "Pegá dominios separados por ; : " dom_list </dev/tty
+      else
+        read -r -p "Pegá dominios separados por ; : " dom_list
+      fi
+      dom_list="${dom_list// /}"
+      [[ -z "$dom_list" ]] && { echo -e "${YLW}Sin dominios, uso auto.${NC}" >"$O"; domains_mode="auto"; dom_list="$(payload_domains_from_panel | paste -sd';' -)"; }
+      if [[ "$dom_choice" == "4" ]]; then
+        mkdir -p "$PAYLOAD_DIR" >/dev/null 2>&1 || true
+        : > "$PAYLOAD_DOMAINS_FILE"
+        IFS=";" read -r -a parts <<< "$dom_list"
+        for part in "${parts[@]}"; do
+          part="${part// /}"
+          [[ -z "$part" ]] && continue
+          echo "$part" >> "$PAYLOAD_DOMAINS_FILE"
+        done
+        domains_mode="manual_saved"
+      else
+        domains_mode="manual"
+      fi
+      ;;
+    *)
+      domains_mode="auto"
+      dom_list="$(payload_domains_from_panel | paste -sd';' -)"
+      ;;
+  esac
+
+  dom_list="${dom_list// /}"
+  dom_rot="[rotate=${dom_list}]"
+
+  echo >"$O"
+  echo -e "${GRN}✅ Payload generado:${NC} (tpl=${tid} | backend=${backend})" >"$O"
+  echo "--------------------------------------------------------------" >"$O"
+  out="$(payload_render "$tpl" "$backend" "$dom_list" "$dom_rot")"
+  echo "$out" >"$O"
+  echo "--------------------------------------------------------------" >"$O"
 
   mkdir -p "$PAYLOAD_DIR" >/dev/null 2>&1 || true
   printf "%s\n" "$out" > "$PAYLOAD_LAST_FILE" 2>/dev/null || true
 
-  echo -e "${DIM}Tip:${NC} Copiá el bloque completo y enviáselo al cliente."
+  payload_save_generated "$backend" "$tid" "$domains_mode" "$dom_list" "$out" >/dev/null 2>&1 || true
+
+  echo -e "${DIM}Tip:${NC} Copiá el bloque completo y enviáselo al cliente." >"$O"
+  echo -e "${DIM}Guardado también para ese backend (Payloads → Ver guardados).${NC}" >"$O"
   return 0
 }
 
@@ -2453,18 +2676,30 @@ payload_template_delete() {
 payload_menu() {
   payload_init_defaults
   while true; do
-    echo -e "${WHT}🧾 Payloads${NC}"
-    echo -e "${DIM}Generá payload eligiendo plantilla + backend. Las plantillas se pueden editar/crear.${NC}\n"
-    echo "1) 🧾 Generar payload (plantilla + backend)"
-    echo "2) 📋 Ver plantillas"
-    echo "3) ✏️  Editar plantilla"
-    echo "4) ➕ Agregar nueva plantilla"
-    echo "5) 🗑️  Eliminar plantilla"
-    echo "6) 🌐 Dominios Host (rotación/lista)"
-    echo "7) 👁️  Ver último payload generado"
-    echo "0) Volver"
-    read -r -p "Opción: " op
-    echo
+    local O; O="$(payload_out)"
+    echo -e "${WHT}🧾 Payloads (plantillas + generar)${NC}" >"$O"
+    echo -e "${DIM}Generá payload eligiendo plantilla + backend. Podés editar/crear plantillas y dominios Host.${NC}\n" >"$O"
+
+    echo "1) 🧾 Generar payload (plantilla + backend)" >"$O"
+    echo "2) 📋 Listar plantillas" >"$O"
+    echo "3) ✏️  Editar plantilla" >"$O"
+    echo "4) ➕ Agregar plantilla nueva" >"$O"
+    echo "5) 🗑️  Eliminar plantilla" >"$O"
+    echo "6) 🌐 Dominios Host (override / sync)" >"$O"
+    echo "7) 👁️  Ver último payload generado" >"$O"
+    echo "8) 📌 Ver payload guardado por backend" >"$O"
+    echo "9) 🗑️  Borrar payload guardado por backend" >"$O"
+    echo "0) Volver" >"$O"
+    echo >"$O"
+
+    local op
+    if [[ -r /dev/tty ]]; then
+      read -r -p "Opción: " op </dev/tty
+    else
+      read -r -p "Opción: " op
+    fi
+    echo >"$O"
+
     case "$op" in
       1) payload_generate; pause ;;
       2) payload_list_templates; pause ;;
@@ -2472,9 +2707,21 @@ payload_menu() {
       4) payload_template_add; pause ;;
       5) payload_template_delete; pause ;;
       6) payload_domains_menu ;;
-      7) [[ -f "$PAYLOAD_LAST_FILE" ]] && cat "$PAYLOAD_LAST_FILE" || echo "(nada aún)"; pause ;;
+      7)
+        if [[ -s "$PAYLOAD_LAST_FILE" ]]; then
+          echo -e "${GRN}✅ Último payload:${NC}" >"$O"
+          echo "--------------------------------------------------------------" >"$O"
+          cat "$PAYLOAD_LAST_FILE" >"$O"
+          echo "--------------------------------------------------------------" >"$O"
+        else
+          echo -e "${YLW}No hay payload generado todavía.${NC}" >"$O"
+        fi
+        pause
+        ;;
+      8) payload_view_generated; pause ;;
+      9) payload_delete_generated; pause ;;
       0) return 0 ;;
-      *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
+      *) echo -e "${YLW}Opción inválida.${NC}" >"$O"; pause ;;
     esac
   done
 }
