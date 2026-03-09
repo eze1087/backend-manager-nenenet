@@ -2253,6 +2253,19 @@ payload_out() {
   fi
 }
 
+payload_print_block() {
+  # Imprime un bloque "copiable" para Termius/Bitvise.
+  # Todo lo que esté entre START/END es solo el payload.
+  local payload="$1"
+  local O; O="$(payload_out)"
+  echo >"$O"
+  echo "[START_PAYLOAD]" >"$O"
+  printf "%s\n" "$payload" >"$O"
+  echo "[END_PAYLOAD]" >"$O"
+  echo >"$O"
+}
+
+
 payload_list_templates() {
   payload_init_defaults
   local O; O="$(payload_out)"
@@ -2425,9 +2438,7 @@ payload_view_generated() {
     return 0
   fi
   echo -e "${GRN}✅ Payload guardado para:${NC} $key" >"$O"
-  echo "--------------------------------------------------------------" >"$O"
-  cat "${PAYLOAD_GEN_DIR}/${key}.txt" >"$O"
-  echo "--------------------------------------------------------------" >"$O"
+  payload_print_block "$(cat "${PAYLOAD_GEN_DIR}/${key}.txt" 2>/dev/null || true)"
 }
 
 payload_delete_generated() {
@@ -2536,17 +2547,15 @@ payload_generate() {
 
   echo >"$O"
   echo -e "${GRN}✅ Payload generado:${NC} (tpl=${tid} | backend=${backend})" >"$O"
-  echo "--------------------------------------------------------------" >"$O"
   out="$(payload_render "$tpl" "$backend" "$dom_list" "$dom_rot")"
-  echo "$out" >"$O"
-  echo "--------------------------------------------------------------" >"$O"
+  payload_print_block "$out"
 
   mkdir -p "$PAYLOAD_DIR" >/dev/null 2>&1 || true
   printf "%s\n" "$out" > "$PAYLOAD_LAST_FILE" 2>/dev/null || true
 
   payload_save_generated "$backend" "$tid" "$domains_mode" "$dom_list" "$out" >/dev/null 2>&1 || true
 
-  echo -e "${DIM}Tip:${NC} Copiá el bloque completo y enviáselo al cliente." >"$O"
+  echo -e "${DIM}Tip:${NC} Copiá SOLO lo que está entre [START_PAYLOAD] y [END_PAYLOAD]." >"$O"
   echo -e "${DIM}Guardado también para ese backend (Payloads → Ver guardados).${NC}" >"$O"
   return 0
 }
@@ -2710,9 +2719,7 @@ payload_menu() {
       7)
         if [[ -s "$PAYLOAD_LAST_FILE" ]]; then
           echo -e "${GRN}✅ Último payload:${NC}" >"$O"
-          echo "--------------------------------------------------------------" >"$O"
-          cat "$PAYLOAD_LAST_FILE" >"$O"
-          echo "--------------------------------------------------------------" >"$O"
+          payload_print_block "$(cat "$PAYLOAD_LAST_FILE" 2>/dev/null || true)"
         else
           echo -e "${YLW}No hay payload generado todavía.${NC}" >"$O"
         fi
