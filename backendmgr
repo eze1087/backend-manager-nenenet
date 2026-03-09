@@ -843,14 +843,19 @@ EOF
 
 # ✅ toggles para logging (opción 11)
 set_traffic_stats_enabled() {
-  local new="$1" # true/false
+  local new="${1:-true}" # true/false
   local since=""
   if [[ "$new" == "true" ]]; then
     since="$(date '+%Y-%m-%d %H:%M:%S')"
   fi
 
-  jq --argjson en "$new" --arg since "$since" '
-    .traffic_stats_enabled = $en
+  if [[ "$new" != "true" && "$new" != "false" ]]; then
+    echo -e "${YLW}⚠️ Valor inválido: $new (use true/false).${NC}"
+    return 0
+  fi
+
+  jq --arg en "$new" --arg since "$since" '
+    .traffic_stats_enabled = ($en == "true")
     | .traffic_stats_since = $since
   ' "$CFG_FILE" > "${CFG_FILE}.tmp" && mv "${CFG_FILE}.tmp" "$CFG_FILE"
 
@@ -2960,18 +2965,16 @@ traffic_stats() {
     0) return 0 ;;
     3)
       if [[ "${TRAFFIC_STATS_ENABLED}" == "true" ]]; then
-        echo -e "${YLW}Ya está activado.${NC}"
-        return 0
+        echo -e "${YLW}Ya está activado.${NC} ${DIM}(reaplicando)${NC}"
       fi
       set_traffic_stats_enabled true
       echo -e "${GRN}✅ Logging activado.${NC}"
-      echo -e "${DIM}Desde ahora se acumula tráfico en:${NC} ${STATS_LOG}"
+      echo -e "${DIM}Archivo:${NC} ${STATS_LOG}"
       return 0
       ;;
     4)
       if [[ "${TRAFFIC_STATS_ENABLED}" != "true" ]]; then
-        echo -e "${YLW}Ya está desactivado.${NC}"
-        return 0
+        echo -e "${YLW}Ya está desactivado.${NC} ${DIM}(reaplicando)${NC}"
       fi
       set_traffic_stats_enabled false
       echo -e "${GRN}✅ Logging desactivado.${NC}"
@@ -3325,7 +3328,7 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -lc 'mkdir -p /var/lib/backendmgr; NGX="/usr/sbin/nginx.real"; [ -x "$NGX" ] || NGX="/usr/sbin/nginx"; if "$NGX" -t; then systemctl ${action} nginx; date "+%Y-%m-%d %H:%M:%S" > /var/lib/backendmgr/nginx_${action}.last; fi'
+ExecStart=/bin/bash -lc 'mkdir -p /var/lib/backendmgr; NGX="/usr/sbin/nginx.real"; [ -x "\$NGX" ] || NGX="/usr/sbin/nginx"; if "\$NGX" -t; then systemctl ${action} nginx; date "+%Y-%m-%d %H:%M:%S" > /var/lib/backendmgr/nginx_${action}.last; fi'
 "
 
   systemd_write_unit "/etc/systemd/system/${tmr}" \
