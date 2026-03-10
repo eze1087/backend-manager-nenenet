@@ -184,9 +184,11 @@ ensure_files() {
 
   [[ -f "$NGX_MOTHERS_UPSTREAMS" ]] || : > "$NGX_MOTHERS_UPSTREAMS"
 
-  [[ -f "$NGX_LOGGING_SNIP" ]] || cat > "$NGX_LOGGING_SNIP" <<'EOF'
-log_format backendmgr_stats '$time_local|$remote_addr|$host|$http_backend|$upstream_addr|$status|$body_bytes_sent|$request_time|$upstream_response_time|$request';
+  if [[ ! -f "$NGX_LOGGING_SNIP" ]] || ! grep -q '\$request_length' "$NGX_LOGGING_SNIP" 2>/dev/null; then
+  cat > "$NGX_LOGGING_SNIP" <<'EOF'
+log_format backendmgr_stats '$time_local|$remote_addr|$host|$http_backend|$upstream_addr|$status|$body_bytes_sent|$request_length|$upstream_bytes_sent|$upstream_bytes_received|$request_time|$upstream_response_time|$request';
 EOF
+fi
 }
 
 read_cfg() {
@@ -957,35 +959,66 @@ fi
 [[ -f "$DB" ]] || : > "$DB"
 
 # Procesar incremental:
-# - Primero cargar DB existente (key bytes req)
-# - Luego sumar nuevas líneas del log
-# - Guardar DB actualizado
+# - Carga DB existente (soporta formatos viejos y nuevos)
+# - Suma nuevas líneas del log
+# - Guarda DB actualizado y ordenado por TOTAL (down+up)
 tmp="${DB}.tmp.$$"
 
-# Nota: log format:
-# time|remote_addr|host|http_backend|upstream_addr|status|body_bytes_sent|...
-# awk de verdad (dos pasadas: DB + nuevas líneas)
-tail -c +"$start" "$STATS_LOG" 2>/dev/null | awk -F'|' -v keyf="$KEYFIELD" -v DBFILE="$DB" '
+# Log format esperado (compat):
+# time|remote_addr|host|http_backend|upstream_addr|status|body_bytes_sent|request_length|upstream_bytes_sent|upstream_bytes_received|...
+tail -c +"$start" "$STATS_LOG" 2>/dev/null | awk -F'[\t|]' -v mode="$MODE" -v keyf="$KEYFIELD" -v DBFILE="$DB" '
   BEGIN { OFS="\t" }
   FNR==NR {
-    # DB: key \t bytes \t req
-    if($1!=""){
-      k=$1; b[k]+=$2; r[k]+=$3
-    }
+    # DB formatos soportados:
+    #  - key total down up req
+    #  - key down up req
+    #  - key total req
+    if($1=="") next
+    k=$1; gsub(/\r/,"",k)
+    if(NF>=5){ down[k]+=$3+0; up[k]+=$4+0; req[k]+=$5+0 }
+    else if(NF==4){ down[k]+=$2+0; up[k]+=$3+0; req[k]+=$4+0 }
+    else if(NF==3){ down[k]+=$2+0; up[k]+=0; req[k]+=$3+0 }
     next
   }
-  {
+  NF>=7 {
     k=$keyf
     if(k=="") k="(vacío)"
-    bytes=$7
-    if(bytes=="") bytes=0
-    # bytes viene numérico
-    r[k]+=1
-    b[k]+=bytes
+    gsub(/\r/,"",k)
+
+    body=$7+0
+    req_len=0
+    if(NF>=8) req_len=$8+0
+
+    usent=0; urecv=0
+    if(NF>=9){
+      usent=$9
+      if(usent=="" || usent=="-") usent=0
+      usent+=0
+    }
+    if(NF>=10){
+      urecv=$10
+      if(urecv=="" || urecv=="-") urecv=0
+      urecv+=0
+    }
+
+    # Modo IP: up/down desde cliente
+    # Modo backend: up/down hacia upstream (si hay), fallback a req_len/body
+    if(mode=="ip"){
+      down_add=body
+      up_add=req_len
+    } else {
+      down_add=(urecv>0 ? urecv : body)
+      up_add=(usent>0 ? usent : req_len)
+    }
+
+    down[k]+=down_add
+    up[k]+=up_add
+    req[k]+=1
   }
-  END{
-    for(k in b){
-      print k, b[k], r[k]
+  END {
+    for(k in req){
+      total=down[k]+up[k]
+      print k, total, down[k], up[k], req[k]
     }
   }
 ' "$DB" - | sort -k2,2nr > "$tmp" || true
@@ -1140,50 +1173,61 @@ traffic_scan_run_now() {
   read_cfg
   [[ -f "$STATS_LOG" ]] || { echo -e "${YLW}No existe todavía: ${STATS_LOG}${NC}"; return 0; }
 
-  local state_dir="${STATE_DIR:-/var/lib/backendmgr}"
-  mkdir -p "$state_dir" 2>/dev/null || true
+  mkdir -p /var/lib/backendmgr 2>/dev/null || true
 
-  local db_backend="${TRAFFIC_DB_BACKEND:-${state_dir}/traffic_backend.db}"
-  local db_ip="${TRAFFIC_DB_IP:-${state_dir}/traffic_ip.db}"
-  local last_run="${TRAFFIC_DB_LAST_RUN:-${state_dir}/traffic_last_run.txt}"
+  local db="/var/lib/backendmgr/traffic_totals_backend.db"
+  [[ "$mode" == "ip" ]] && db="/var/lib/backendmgr/traffic_totals_ip.db"
 
-  local db="$db_backend"
-  [[ "$mode" == "ip" ]] && db="$db_ip"
-
-  # Recalcula totales usando TODO el log (sin depender de \r en regex; compatible mawk)
-  if [[ "$mode" == "ip" ]]; then
-    awk -F'|' '
-      BEGIN{ cr=sprintf("%c",13) }
-      NF>=7{
+  # Recalcula totales usando TODO el log.
+  # Soporta log viejo (solo $7) y log nuevo (incluye $8..$10):
+  # 7=body_bytes_sent, 8=request_length, 9=upstream_bytes_sent, 10=upstream_bytes_received
+  awk -F'|' -v mode="$mode" '
+    BEGIN{ cr=sprintf("%c",13) }
+    NF>=7{
+      if(mode=="ip"){
         k=$2
-        gsub(cr,"",k)
-        sub(/^[[:space:]]+/,"",k); sub(/[[:space:]]+$/,"",k)
-        if(k=="") next
-        bytes=$7+0
-        req[k]+=1; b[k]+=bytes
-      }
-      END{ for(k in b){ printf "%s|%.0f|%d\n", k, b[k], req[k] } }
-    ' "$STATS_LOG" | sort -t"|" -k2,2nr > "${db}.tmp"
-  else
-    awk -F'|' '
-      BEGIN{ cr=sprintf("%c",13) }
-      NF>=7{
+      } else {
         k=$4
         if(k=="") k="(vacío)"
-        gsub(cr,"",k)
-        sub(/^[[:space:]]+/,"",k); sub(/[[:space:]]+$/,"",k)
-        if(k=="") k="(vacío)"
-        bytes=$7+0
-        req[k]+=1; b[k]+=bytes
       }
-      END{ for(k in b){ printf "%s|%.0f|%d\n", k, b[k], req[k] } }
-    ' "$STATS_LOG" | sort -t"|" -k2,2nr > "${db}.tmp"
-  fi
+      gsub(cr,"",k)
+      sub(/^[[:space:]]+/,"",k); sub(/[[:space:]]+$/,"",k)
+      if(k=="") k="(vacío)"
+
+      body=$7+0
+      req_len=0
+      if(NF>=8) req_len=$8+0
+
+      usent=0; urecv=0
+      if(NF>=9){ usent=$9; if(usent==""||usent=="-") usent=0; usent+=0 }
+      if(NF>=10){ urecv=$10; if(urecv==""||urecv=="-") urecv=0; urecv+=0 }
+
+      if(mode=="ip"){
+        down_add=body
+        up_add=req_len
+      } else {
+        down_add=(urecv>0 ? urecv : body)
+        up_add=(usent>0 ? usent : req_len)
+      }
+
+      req[k]+=1
+      down[k]+=down_add
+      up[k]+=up_add
+    }
+    END{
+      for(k in req){
+        total=down[k]+up[k]
+        printf "%s|%.0f|%.0f|%.0f|%d
+", k, total, down[k], up[k], req[k]
+      }
+    }
+  ' "$STATS_LOG" | sort -t"|" -k2,2nr > "${db}.tmp" 2>/dev/null || true
 
   mv "${db}.tmp" "$db" 2>/dev/null || true
-  date '+%Y-%m-%d %H:%M:%S' > "$last_run" 2>/dev/null || true
+  date '+%Y-%m-%d %H:%M:%S' > /var/lib/backendmgr/traffic_last_run 2>/dev/null || true
   return 0
 }
+
 
 traffic_scan_enable() {
   local mode="$1" interval="$2"
@@ -1257,11 +1301,9 @@ traffic_scan_status() {
 
 traffic_show_from_db() {
   local mode="$1" # ip|backend
+  local limit="${2:-50}"
   local db="/var/lib/backendmgr/traffic_totals_backend.db"
-
-  if [[ "$mode" == "ip" ]]; then
-    db="/var/lib/backendmgr/traffic_totals_ip.db"
-  fi
+  [[ "$mode" == "ip" ]] && db="/var/lib/backendmgr/traffic_totals_ip.db"
 
   [[ -f "$db" ]] || { echo -e "${YLW}No hay resumen todavía (db vacío). Esperá 1 ciclo del scanner.${NC}"; return 0; }
 
@@ -1269,26 +1311,22 @@ traffic_show_from_db() {
   local map_tmp=""
   if [[ "$mode" != "ip" ]]; then
     map_tmp="$(mktemp)"
-    # backends.map:        "svpnene38" "http://1.2.3.4:80";
     awk '
       match($0, /"([^"]+)"[ \t]+"http:\/\/([^"]+)"/, m) { print m[1] "\t" m[2] }
     ' "$NGX_BACKENDS_MAP" 2>/dev/null | sort -u > "$map_tmp" || true
   fi
 
   if [[ "$mode" == "ip" ]]; then
-    printf "%-18s %-12s %-10s\n" "IP" "TOTAL" "REQ"
-    echo "-----------------------------------------------"
+    printf "%-18s %-12s %-12s %-12s %-10s\n" "IP" "DOWN" "UP" "TOTAL" "REQ"
+    echo "--------------------------------------------------------------------------"
   else
-    printf "%-22s %-18s %-12s %-10s\n" "BACKEND" "IP:PORT" "TOTAL" "REQ"
-    echo "---------------------------------------------------------------------"
+    printf "%-22s %-18s %-12s %-12s %-12s %-10s\n" "BACKEND" "IP:PORT" "DOWN" "UP" "TOTAL" "REQ"
+    echo "------------------------------------------------------------------------------------------------"
   fi
 
-  # DB puede venir en TAB o en PIPE (key|bytes|req). Lo hacemos robusto.
-  # Mostramos TOTAL en MB/GB (sin perder REQ).
   awk -v mode="$mode" -v MAP="$map_tmp" '
     BEGIN{
       FS="[\t|]"; OFS="\t";
-      # cargar mapa backend->ip:port
       if(mode!="ip" && MAP!=""){
         while((getline line < MAP)>0){
           split(line,a,"\t");
@@ -1297,32 +1335,78 @@ traffic_show_from_db() {
         close(MAP);
       }
     }
+    function human(bytes, mb, out){
+      mb=bytes/1024/1024;
+      if(mb>=1024) out=sprintf("%.2f GB", mb/1024);
+      else out=sprintf("%.2f MB", mb);
+      return out;
+    }
     NF>=3{
-      k=$1; b=$2+0; r=$3+0;
-      gsub(/\r/,"",k);
+      k=$1; gsub(/\r/,"",k);
       sub(/^[[:space:]]+/,"",k); sub(/[[:space:]]+$/,"",k);
       if(k=="") next;
 
-      # convertir bytes -> human
-      mb=b/1024/1024;
-      if(mb>=1024){
-        total=sprintf("%.2f GB", mb/1024);
+      # DB formatos soportados:
+      #  - key total down up req
+      #  - key down up req
+      #  - key total req
+      total=0; down=0; up=0; req=0;
+      if(NF>=5){
+        total=$2+0; down=$3+0; up=$4+0; req=$5+0;
+      } else if(NF==4){
+        down=$2+0; up=$3+0; req=$4+0; total=down+up;
+      } else if(NF==3){
+        total=$2+0; down=total; up=0; req=$3+0;
       } else {
-        total=sprintf("%.2f MB", mb);
+        next;
       }
 
       if(mode=="ip"){
-        printf "%-18s %-12s %-10d\n", k, total, r;
+        printf "%-18s %-12s %-12s %-12s %-10d\n", k, human(down), human(up), human(total), req;
       } else {
         ipport=(k in mp)? mp[k] : "-";
-        printf "%-22s %-18s %-12s %-10d\n", k, ipport, total, r;
+        printf "%-22s %-18s %-12s %-12s %-12s %-10d\n", k, ipport, human(down), human(up), human(total), req;
       }
     }
-  ' "$db" 2>/dev/null | head -n 50 || true
+  ' "$db" 2>/dev/null | head -n "$limit" || true
 
   [[ -n "$map_tmp" ]] && rm -f "$map_tmp" 2>/dev/null || true
   return 0
 }
+
+traffic_live_monitor() {
+  local mode="${1:-backend}"  # backend|ip
+  local refresh="${2:-2}"     # segundos
+  local top="${3:-30}"        # filas
+
+  [[ "$mode" == "backend" || "$mode" == "ip" ]] || mode="backend"
+  [[ "$refresh" =~ ^[0-9]+$ ]] || refresh=2
+  [[ "$top" =~ ^[0-9]+$ ]] || top=30
+  (( refresh < 1 )) && refresh=1
+  (( top < 5 )) && top=5
+  (( top > 100 )) && top=100
+
+  local key=""
+  while true; do
+    clear || true
+    echo -e "${CYA}📺 Monitor en vivo de tráfico${NC}  ${DIM}(modo=${mode} • refresh=${refresh}s • top=${top})${NC}"
+    echo -e "${DIM}Tip:${NC} presioná ${WHT}q${NC} para salir.\n"
+    traffic_show_from_db "$mode" "$top"
+    echo
+
+    key=""
+    if [[ -r /dev/tty ]]; then
+      # espera refresh segundos o tecla
+      IFS= read -rsn1 -t "$refresh" key </dev/tty || true
+    else
+      sleep "$refresh" || true
+    fi
+    [[ "${key,,}" == "q" ]] && break
+  done
+  return 0
+}
+
+
 
 
 traffic_scan_menu() {
@@ -2024,6 +2108,16 @@ backend_add_with_days() {
   backend_meta_upsert "$key" "$ip" "$port" "$created_old" "$exp"
 
   echo -e "${GRN}📅 Vence:${NC} $(backend_fmt_date "$exp")"
+
+  echo
+  read -r -p "¿Generar payload ahora para este backend? (s/N): " yn
+  case "${yn,,}" in
+    s|si|sí|y|yes)
+      payload_generate_for_backend "$key"
+      ;;
+    *) : ;;
+  esac
+
   return 0
 }
 
@@ -2574,6 +2668,99 @@ payload_generate() {
   return 0
 }
 
+payload_generate_for_backend() {
+  local backend="$1"
+  payload_init_defaults
+  local O; O="$(payload_out)"
+
+  echo -e "${CYA}Generar payload (backend: ${backend})${NC}" >"$O"
+  echo -e "${DIM}Elegí la plantilla y los dominios madre. (El backend ya está seleccionado)${NC}\n" >"$O"
+
+  local tid tpl out dom_choice dom_list dom_rot domains_mode
+
+  # 1) Plantilla (muestra lista y selecciona)
+  if ! payload_pick_template_id tid; then
+    return 0
+  fi
+
+  tpl="$(cat "$(payload_tpl_file "$tid")" 2>/dev/null || true)"
+  if [[ -z "${tpl//[[:space:]]/}" ]]; then
+    echo -e "${YLW}Plantilla vacía.${NC}" >"$O"
+    return 0
+  fi
+
+  # 2) Dominios madre
+  local current_auto current_override
+  current_auto="$(payload_domains_from_panel | paste -sd';' -)"
+  current_override=""
+  if [[ -s "$PAYLOAD_DOMAINS_FILE" ]]; then
+    current_override="$(payload_domains_join_semicolon)"
+  fi
+  [[ -z "$current_auto" ]] && current_auto="(no configurado)"
+  [[ -z "$current_override" ]] && current_override="(no override)"
+
+  echo -e "\n${CYA}Dominios madre para Host:${NC}" >"$O"
+  echo -e "${DIM}1) Usar dominios del panel (Dominios madre)\n2) Usar override guardado (si existe)\n3) Manual (solo este payload)\n4) Manual y guardar override${NC}\n" >"$O"
+  echo -e "Auto: ${GRN}${current_auto}${NC}" >"$O"
+  echo -e "Override: ${GRN}${current_override}${NC}\n" >"$O"
+
+  if [[ -r /dev/tty ]]; then
+    read -r -p "Opción (1-4) [1]: " dom_choice </dev/tty
+  else
+    read -r -p "Opción (1-4) [1]: " dom_choice
+  fi
+  dom_choice="${dom_choice:-1}"
+
+  case "$dom_choice" in
+    2)
+      domains_mode="override"
+      dom_list="$(payload_domains_join_semicolon)"
+      [[ -z "$dom_list" ]] && { domains_mode="auto"; dom_list="$(payload_domains_from_panel | paste -sd';' -)"; }
+      ;;
+    3|4)
+      if [[ -r /dev/tty ]]; then
+        read -r -p "Pegá dominios separados por ; : " dom_list </dev/tty
+      else
+        read -r -p "Pegá dominios separados por ; : " dom_list
+      fi
+      dom_list="${dom_list// /}"
+      [[ -z "$dom_list" ]] && { echo -e "${YLW}Sin dominios, uso auto.${NC}" >"$O"; domains_mode="auto"; dom_list="$(payload_domains_from_panel | paste -sd';' -)"; }
+      if [[ "$dom_choice" == "4" ]]; then
+        mkdir -p "$PAYLOAD_DIR" >/dev/null 2>&1 || true
+        : > "$PAYLOAD_DOMAINS_FILE"
+        IFS=";" read -r -a parts <<< "$dom_list"
+        for part in "${parts[@]}"; do
+          part="${part// /}"
+          [[ -z "$part" ]] && continue
+          echo "$part" >> "$PAYLOAD_DOMAINS_FILE"
+        done
+        domains_mode="manual_saved"
+      else
+        domains_mode="manual"
+      fi
+      ;;
+    *)
+      domains_mode="auto"
+      dom_list="$(payload_domains_from_panel | paste -sd';' -)"
+      ;;
+  esac
+
+  dom_list="${dom_list// /}"
+  dom_rot="[rotate=${dom_list}]"
+
+  out="$(payload_render "$tpl" "$backend" "$dom_list" "$dom_rot")"
+  payload_print_block "$out"
+
+  mkdir -p "$PAYLOAD_DIR" >/dev/null 2>&1 || true
+  printf "%s\n" "$out" > "$PAYLOAD_LAST_FILE" 2>/dev/null || true
+  payload_save_generated "$backend" "$tid" "$domains_mode" "$dom_list" "$out" >/dev/null 2>&1 || true
+
+  echo -e "${GRN}✅ Payload generado y guardado para:${NC} ${backend}" >"$O"
+  echo -e "${DIM}Tip:${NC} Copiá SOLO lo que está entre [START_PAYLOAD] y [END_PAYLOAD]." >"$O"
+  return 0
+}
+
+
 payload_domains_menu() {
   payload_init_defaults
   while true; do
@@ -2931,6 +3118,16 @@ validate_connection_test() {
 traffic_stats() {
   read_cfg
 
+  # Auto-upgrade del formato de logging (para medir UP/DOWN de forma más precisa)
+  if [[ -f "$NGX_LOGGING_SNIP" ]] && ! grep -q '\$request_length' "$NGX_LOGGING_SNIP" 2>/dev/null; then
+    echo -e "${YLW}⚙️ Actualizando formato de logging de tráfico (UP/DOWN)...${NC}"
+    cat > "$NGX_LOGGING_SNIP" <<'EOF'
+log_format backendmgr_stats '$time_local|$remote_addr|$host|$http_backend|$upstream_addr|$status|$body_bytes_sent|$request_length|$upstream_bytes_sent|$upstream_bytes_received|$request_time|$upstream_response_time|$request';
+EOF
+    nginx_test_reload
+    read_cfg
+  fi
+
   echo -e "${CYA}Tráfico (por IP o Backend)${NC}"
   echo -e "${DIM}Archivo: ${STATS_LOG}${NC}"
   if [[ "${TRAFFIC_STATS_ENABLED}" == "true" ]]; then
@@ -2957,6 +3154,7 @@ traffic_stats() {
   echo "5) ⚙️  Escaneo permanente (scanner): menú"
   echo "6) 📌 Totales acumulados (recalcular y mostrar)"
   echo "7) 🧹 Borrar historial del scanner (acumulado)"
+  echo "8) 📺 Monitor en vivo (lista actualizable)"
   echo "0) Volver"
   read -r -p "Opción: " op
   echo
@@ -2999,6 +3197,22 @@ traffic_stats() {
 
     7)
       traffic_scan_clear_history
+      return 0
+      ;;
+
+    8)
+      echo -e "${CYA}Monitor en vivo${NC}"
+      echo "1) Por IP"
+      echo "2) Por Backend (header)"
+      read -r -p "Opción [2]: " w
+      w="${w:-2}"
+      local mode="backend"
+      [[ "$w" == "1" ]] && mode="ip"
+      read -r -p "Refresh cada cuántos segundos (Enter=2): " rs
+      rs="${rs:-2}"
+      read -r -p "Mostrar cuántas filas (Enter=30): " top
+      top="${top:-30}"
+      traffic_live_monitor "$mode" "$rs" "$top"
       return 0
       ;;
 
@@ -3816,9 +4030,10 @@ menu() {
   echo -e "${BLU}──────────────────────────────────────────────────────────────${NC}"
   echo
   echo -e "${BCYA}[01]${NC} 🌐 Dominios madre (crear / editar / eliminar)"
-  echo -e "${BCYA}[02]${NC} ➕ Agregar backend (rápido: nombre + IP + puerto)"
+  echo -e "${BCYA}[02]${NC} ➕ Agregar backend (rápido) (también en 03→1)"
   echo -e "${BCYA}[03]${NC} 👥 Administrar usuarios backend (crear/editar/vencimiento)"
   echo -e "${BCYA}[04]${NC} 🌍 Listar dominios madre (servers)"
+  echo -e "${BCYA}[05]${NC} ↪️ Alias (compat): Admin backends (igual que 03)"
   echo -e "${BCYA}[06]${NC} ✅ Healthcheck (HTTP y latencia)"
   echo -e "${BCYA}[07]${NC} 🧪 Validar conexión (dominio → backend por header)"
   echo -e "${BCYA}[08]${NC} 🧩 Editar timeouts del dominio madre (manual por nombre)"
@@ -3827,6 +4042,7 @@ menu() {
   echo -e "${BCYA}[11]${NC} 📊 Tráfico por IP / Backend (stats log + scanner)"
   echo -e "${BCYA}[12]${NC} 🔥 Firewall UFW: abrir puerto (80/443/otro)"
   echo -e "${BCYA}[13]${NC} 💾 Backup y restauración"
+  echo -e "${BCYA}[14]${NC} ↪️ Alias (compat): Backup/Restore (igual que 13)"
   echo -e "${BCYA}[15]${NC} ⚙️  Servicios de Nginx (Status/Stop/Start/Reload/Restart)"
   echo -e "${BCYA}[16]${NC} 🚀 Speedtest (Ping / Bajada / Subida)"
   echo -e "${BCYA}[17]${NC} 🧰 Mantenimiento programado (RAM / Nginx timers)"
