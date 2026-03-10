@@ -1217,8 +1217,7 @@ traffic_scan_run_now() {
     END{
       for(k in req){
         total=down[k]+up[k]
-        printf "%s|%.0f|%.0f|%.0f|%d
-", k, total, down[k], up[k], req[k]
+        printf "%s|%.0f|%.0f|%.0f|%d\n", k, total, down[k], up[k], req[k]
       }
     }
   ' "$STATS_LOG" | sort -t"|" -k2,2nr > "${db}.tmp" 2>/dev/null || true
@@ -1305,7 +1304,7 @@ traffic_show_from_db() {
   local db="/var/lib/backendmgr/traffic_totals_backend.db"
   [[ "$mode" == "ip" ]] && db="/var/lib/backendmgr/traffic_totals_ip.db"
 
-  [[ -f "$db" ]] || { echo -e "${YLW}No hay resumen todavía (db vacío). Esperá 1 ciclo del scanner.${NC}"; return 0; }
+  [[ -s "$db" ]] || { echo -e "${YLW}No hay resumen todavía (db vacío). Esperá 1 ciclo del scanner o generá tráfico.${NC}"; return 0; }
 
   # Mapa backend -> ip:port (desde backends.map)
   local map_tmp=""
@@ -1386,12 +1385,41 @@ traffic_live_monitor() {
   (( top < 5 )) && top=5
   (( top > 100 )) && top=100
 
+
+  # auto-refresh db: si no hay datos todavía, recalcular desde el log
+  local db="/var/lib/backendmgr/traffic_totals_backend.db"
+  [[ "$mode" == "ip" ]] && db="/var/lib/backendmgr/traffic_totals_ip.db"
+  local shown_hint="0"
+  if [[ ! -s "$db" ]]; then
+    traffic_scan_run_now "$mode" >/dev/null 2>&1 || true
+  fi
   local key=""
   while true; do
     clear || true
+    # refrescar resumen si quedó viejo (no depende del timer)
+    local nowts lastts
+    nowts="$(date +%s)"
+    lastts="$(stat -c %Y "$TRAFFIC_DB_LAST_RUN" 2>/dev/null || echo 0)"
+    if (( nowts - lastts >= refresh )); then
+      traffic_scan_run_now "$mode" >/dev/null 2>&1 || true
+    fi
     echo -e "${CYA}📺 Monitor en vivo de tráfico${NC}  ${DIM}(modo=${mode} • refresh=${refresh}s • top=${top})${NC}"
     echo -e "${DIM}Tip:${NC} presioná ${WHT}q${NC} para salir.\n"
     traffic_show_from_db "$mode" "$top"
+    if [[ "$shown_hint" == "0" ]]; then
+      if [[ ! -s "$db" ]]; then
+        shown_hint="1"
+        echo -e "${YLW}Sin datos todavía.${NC} Esto pasa si el log está vacío o el formato no coincide."
+        echo -e "${DIM}Log:${NC} ${STATS_LOG}
+"
+        if [[ -f "$STATS_LOG" ]]; then
+          echo -e "${DIM}Líneas en log:${NC} $(wc -l < "$STATS_LOG" 2>/dev/null || echo 0)"
+          echo -e "${DIM}Última línea:${NC}"
+          tail -n 1 "$STATS_LOG" 2>/dev/null || true
+          echo
+        fi
+      fi
+    fi
     echo
 
     key=""
@@ -1989,7 +2017,7 @@ domains_menu() {
 # ------------------ BACKENDS ------------------
 
 # ------------------ META BACKENDS (creación / expiración) ------------------
-# Formato: key|ip|port|created_epoch|expires_epoch(0=sin vencimiento)
+# Formato: key|client|ip|port|created_epoch|expires_epoch|payload_tpl|payload_ts (compat: key|ip|port|created|expires)
 backend_meta_normalize() {
   [[ -f "$BACKEND_META_FILE" ]] || return 0
   awk -F'|' 'NF>=1 && $1!=""{a[$1]=$0} END{for(k in a) print a[k]}' "$BACKEND_META_FILE" \
@@ -2004,13 +2032,136 @@ backend_meta_get() {
 }
 
 backend_meta_upsert() {
-  local k="$1" ip="$2" port="$3" created="$4" expires="$5"
+  # Compat:
+  #  A) backend_meta_upsert key ip port created expires
+  #  B) backend_meta_upsert key client ip port created expires [payload_tpl] [payload_ts]
+  local k="$1"
+  local client="" ip="" port="" created="" expires="" payload_tpl="" payload_ts=""
+
+  if [[ $# -eq 5 ]]; then
+    ip="$2"; port="$3"; created="$4"; expires="$5"
+    client="-"; payload_tpl="-"; payload_ts="0"
+    local line nf
+    line="$(backend_meta_get "$k" 2>/dev/null || true)"
+    if [[ -n "$line" ]]; then
+      nf="$(echo "$line" | awk -F'|' '{print NF}')"
+      if [[ "${nf:-0}" -ge 6 ]]; then
+        client="$(echo "$line" | awk -F'|' '{print $2}')"
+        payload_tpl="$(echo "$line" | awk -F'|' '{print $7}')"
+        payloa
+backend_lookup_ipport() {
+  # echo "ip|port" o "" si no existe
+  local key="$1"
+  local line url ipport ip port
+  line="$(backend_lines | awk -v k="$key" '
+    match($0, /^[ \t]*"([^"]+)"/, m){
+      if(m[1]==k){ print; exit }
+    }' 2>/dev/null || true)"
+  [[ -n "$line" ]] || { echo ""; return 0; }
+  url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
+  ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
+  echo "${ip}|${port}"
+}
+
+backend_meta_get_client() {
+  local key="$1" line nf
+  line="$(backend_meta_get "$key" 2>/dev/null || true)"
+  [[ -n "$line" ]] || { echo "-"; return 0; }
+  nf="$(echo "$line" | awk -F'|' '{print NF}')"
+  if [[ "${nf:-0}" -ge 6 ]]; then
+    echo "$line" | awk -F'|' '{print $2}'
+  else
+    echo "-"
+  fi
+}
+
+backend_meta_set_client() {
+  local key="$1" client="$2"
+  client="${client//|/-}"
+  client="$(echo "$client" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+  [[ -z "$client" ]] && client="-"
+
+  local line nf ip port created expires payload_tpl payload_ts now ipport
+  line="$(backend_meta_get "$key" 2>/dev/null || true)"
+  nf="$(echo "$line" | awk -F'|' '{print NF}' 2>/dev/null || echo 0)"
+  now="$(date +%s)"
+
+  if [[ -n "$line" && "${nf:-0}" -ge 6 ]]; then
+    ip="$(echo "$line" | awk -F'|' '{print $3}')"
+    port="$(echo "$line" | awk -F'|' '{print $4}')"
+    created="$(echo "$line" | awk -F'|' '{print $5}')"
+    expires="$(echo "$line" | awk -F'|' '{print $6}')"
+    payload_tpl="$(echo "$line" | awk -F'|' '{print $7}')"
+    payload_ts="$(echo "$line" | awk -F'|' '{print $8}')"
+  else
+    # compat viejo o inexistente
+    ip=""
+    port=""
+    created="0"
+    expires="0"
+    payload_tpl="-"
+    payload_ts="0"
+  fi
+
+  if [[ -z "$ip" || -z "$port" ]]; then
+    ipport="$(backend_lookup_ipport "$key")"
+    ip="${ipport%%|*}"; port="${ipport##*|}"
+  fi
+  [[ -z "$created" || "$created" == "0" ]] && created="$now"
+
+  backend_meta_upsert "$key" "$client" "$ip" "$port" "$created" "${expires:-0}" "${payload_tpl:-"-"}" "${payload_ts:-0}"
+}
+
+backend_meta_set_payload() {
+  local key="$1" payload_tpl="$2" payload_ts="${3:-}"
+  [[ -z "$payload_ts" ]] && payload_ts="$(date +%s)"
+  [[ -z "$payload_tpl" ]] && payload_tpl="-"
+
+  local line nf client ip port created expires now ipport
+  line="$(backend_meta_get "$key" 2>/dev/null || true)"
+  nf="$(echo "$line" | awk -F'|' '{print NF}' 2>/dev/null || echo 0)"
+  now="$(date +%s)"
+
+  if [[ -n "$line" && "${nf:-0}" -ge 6 ]]; then
+    client="$(echo "$line" | awk -F'|' '{print $2}')"
+    ip="$(echo "$line" | awk -F'|' '{print $3}')"
+    port="$(echo "$line" | awk -F'|' '{print $4}')"
+    created="$(echo "$line" | awk -F'|' '{print $5}')"
+    expires="$(echo "$line" | awk -F'|' '{print $6}')"
+  else
+    client="-"; ip=""; port=""; created="0"; expires="0"
+  fi
+
+  if [[ -z "$ip" || -z "$port" ]]; then
+    ipport="$(backend_lookup_ipport "$key")"
+    ip="${ipport%%|*}"; port="${ipport##*|}"
+  fi
+  [[ -z "$created" || "$created" == "0" ]] && created="$now"
+
+  backend_meta_upsert "$key" "$client" "$ip" "$port" "$created" "${expires:-0}" "$payload_tpl" "$payload_ts"
+}
+d_ts="$(echo "$line" | awk -F'|' '{print $8}')"
+      fi
+    fi
+  else
+    client="${2:-"-"}"; ip="${3:-}"; port="${4:-}"; created="${5:-0}"; expires="${6:-0}"
+    payload_tpl="${7:-"-"}"; payload_ts="${8:-0}"
+  fi
+
   mkdir -p "$STATE_DIR" 2>/dev/null || true
   [[ -f "$BACKEND_META_FILE" ]] || : > "$BACKEND_META_FILE"
+
+  # sanitizar
+  client="${client//|/-}"
+  client="$(echo "$client" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+  [[ -z "${client}" ]] && client="-"
+  [[ -z "${payload_tpl}" ]] && payload_tpl="-"
+  [[ -z "${payload_ts}" ]] && payload_ts="0"
+
   # remover vieja
   grep -v -E "^${k}\|" "$BACKEND_META_FILE" > "${BACKEND_META_FILE}.tmp" 2>/dev/null || true
-  printf "%s|%s|%s|%s|%s\n" "$k" "$ip" "$port" "$created" "$expires" >> "${BACKEND_META_FILE}.tmp"
-  mv -f "${BACKEND_META_FILE}.tmp" "$BACKEND_META_FILE"
+  printf "%s|%s|%s|%s|%s|%s|%s|%s\n" "$k" "$client" "$ip" "$port" "$created" "$expires" "$payload_tpl" "$payload_ts" >> "${BACKEND_META_FILE}.tmp"
+  mv -f "${BACKEND_META_FILE}.tmp" "$BACKEND_META_FILE" 2>/dev/null || true
   backend_meta_normalize
 }
 
@@ -2078,6 +2229,11 @@ backend_add_with_days() {
   echo -e "${CYA}Nuevo backend (con vencimiento en días)${NC}"
   echo -e "${DIM}Ejemplo: elnene51 -> 38.242.152.147:80 (30 días)${NC}\n"
 
+  read -r -p "Cliente (opcional): " client
+  client="${client//|/-}"
+  client="$(echo "$client" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+  [[ -z "$client" ]] && client="-"
+
   read -r -p "Nombre del backend (ej: elnene51): " key
   validate_key "$key" || { echo -e "${RED}Nombre inválido.${NC}"; return 0; }
 
@@ -2096,16 +2252,23 @@ backend_add_with_days() {
   local now exp created_old exp_old line
   now="$(date +%s)"
   line="$(backend_meta_get "$key" || true)"
+  local nf
   if [[ -n "$line" ]]; then
-    created_old="$(echo "$line" | awk -F'|' '{print $4}')"
-    exp_old="$(echo "$line" | awk -F'|' '{print $5}')"
+    nf="$(echo "$line" | awk -F'|' '{print NF}' 2>/dev/null || echo 0)"
+    if [[ "${nf:-0}" -ge 6 ]]; then
+      created_old="$(echo "$line" | awk -F'|' '{print $5}')"
+      exp_old="$(echo "$line" | awk -F'|' '{print $6}')"
+    else
+      created_old="$(echo "$line" | awk -F'|' '{print $4}')"
+      exp_old="$(echo "$line" | awk -F'|' '{print $5}')"
+    fi
     [[ -z "$created_old" || "$created_old" == "0" ]] && created_old="$now"
   else
     created_old="$now"
     exp_old="0"
   fi
   exp="$((now + days*86400))"
-  backend_meta_upsert "$key" "$ip" "$port" "$created_old" "$exp"
+  backend_meta_upsert "$key" "$client" "$ip" "$port" "$created_old" "$exp"
 
   echo -e "${GRN}📅 Vence:${NC} $(backend_fmt_date "$exp")"
 
@@ -2122,24 +2285,55 @@ backend_add_with_days() {
 }
 
 backend_list_with_dates() {
-  echo -e "${CYA}Backends (IP/puerto + fechas)${NC}\n"
-  printf "%-4s %-20s %-18s %-6s %-12s %-12s\n" "#" "BACKEND" "IP" "PORT" "CREADO" "VENCE"
-  echo "----------------------------------------------------------------------------"
-  local i=0 key url ipport ip port line created exp
+  echo -e "${CYA}Backends (cliente + IP/puerto + fechas + payload)${NC}\n"
+  printf "%-4s %-16s %-18s %-18s %-6s %-12s %-12s %-7s %-6s\n" "#" "CLIENTE" "BACKEND" "IP" "PORT" "CREADO" "VENCE" "DÍAS" "PAY"
+  echo "---------------------------------------------------------------------------------------------------------------"
+
+  local now; now="$(date +%s)"
+  local i=0 key url ipport ip port line nf client created exp days_left pay
+
   while IFS= read -r line_map; do
     [[ -z "$line_map" ]] && continue
     i=$((i+1))
+
     key="$(echo "$line_map" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
     url="$(echo "$line_map" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
     ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
 
-    line="$(backend_meta_get "$key" || true)"
-    created="$(echo "$line" | awk -F'|' '{print $4}')"
-    exp="$(echo "$line" | awk -F'|' '{print $5}')"
-    [[ -z "$created" ]] && created="0"
-    [[ -z "$exp" ]] && exp="0"
+    line="$(backend_meta_get "$key" 2>/dev/null || true)"
+    nf="$(echo "$line" | awk -F'|' '{print NF}' 2>/dev/null || echo 0)"
 
-    printf "%-4s %-20s %-18s %-6s %-12s %-12s\n" "$i" "$key" "$ip" "$port" "$(backend_fmt_date "$created")" "$(backend_fmt_date "$exp")"
+    client="-"; created="0"; exp="0"; pay="-"
+    if [[ -n "$line" && "${nf:-0}" -ge 6 ]]; then
+      client="$(echo "$line" | awk -F'|' '{print $2}')"
+      created="$(echo "$line" | awk -F'|' '{print $5}')"
+      exp="$(echo "$line" | awk -F'|' '{print $6}')"
+      pay="$(echo "$line" | awk -F'|' '{print $7}')"
+    elif [[ -n "$line" ]]; then
+      created="$(echo "$line" | awk -F'|' '{print $4}')"
+      exp="$(echo "$line" | awk -F'|' '{print $5}')"
+    fi
+
+    # si no hay payload en meta, tomarlo del índice de payloads generados
+    if [[ -z "$pay" || "$pay" == "-" ]]; then
+      pay="$(awk -F'|' -v b="$key" '$1==b{print $2; exit}' "$PAYLOAD_GEN_INDEX" 2>/dev/null || true)"
+      [[ -z "$pay" ]] && pay="-"
+    fi
+
+    days_left="-"
+    if [[ -n "$exp" && "$exp" != "0" && "$exp" =~ ^[0-9]+$ ]]; then
+      local diff=$(( exp - now ))
+      if (( diff <= 0 )); then
+        days_left="0"
+      else
+        days_left="$(( (diff + 86399) / 86400 ))"
+      fi
+    fi
+
+    # cortar cliente para que no rompa tabla
+    client="${client:0:16}"
+    printf "%-4s %-16s %-18s %-18s %-6s %-12s %-12s %-7s %-6s\n" \
+      "$i" "$client" "$key" "$ip" "$port" "$(backend_fmt_date "$created")" "$(backend_fmt_date "$exp")" "$days_left" "$pay"
   done < <(backend_lines)
 
   if [[ "$i" -eq 0 ]]; then
@@ -2179,8 +2373,15 @@ backend_add_days_menu() {
   local now line created exp newexp
   now="$(date +%s)"
   line="$(backend_meta_get "$key" || true)"
-  created="$(echo "$line" | awk -F'|' '{print $4}')"
-  exp="$(echo "$line" | awk -F'|' '{print $5}')"
+  local nf
+  nf="$(echo "$line" | awk -F'|' '{print NF}' 2>/dev/null || echo 0)"
+  if [[ -n "$line" && "${nf:-0}" -ge 6 ]]; then
+    created="$(echo "$line" | awk -F'|' '{print $5}')"
+    exp="$(echo "$line" | awk -F'|' '{print $6}')"
+  else
+    created="$(echo "$line" | awk -F'|' '{print $4}')"
+    exp="$(echo "$line" | awk -F'|' '{print $5}')"
+  fi
   [[ -z "$created" || "$created" == "0" ]] && created="$now"
   [[ -z "$exp" ]] && exp="0"
 
@@ -2202,9 +2403,19 @@ backend_delete_expired() {
   local now removed=0
   now="$(date +%s)"
 
-  while IFS='|' read -r k ip port created exp; do
+  local line nf k exp
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    k="$(echo "$line" | awk -F'|' '{print $1}')"
     [[ -z "$k" ]] && continue
+    nf="$(echo "$line" | awk -F'|' '{print NF}' 2>/dev/null || echo 0)"
+    if [[ "${nf:-0}" -ge 6 ]]; then
+      exp="$(echo "$line" | awk -F'|' '{print $6}')"
+    else
+      exp="$(echo "$line" | awk -F'|' '{print $5}')"
+    fi
     [[ -z "$exp" ]] && exp="0"
+
     if [[ "$exp" != "0" && "$exp" =~ ^[0-9]+$ && "$exp" -lt "$now" ]]; then
       echo -e "${YLW}🗑️ Expirado:${NC} $k (venció $(backend_fmt_date "$exp"))"
       backend_delete_by_key "$k" >/dev/null 2>&1 && removed=$((removed+1)) || true
@@ -2494,6 +2705,8 @@ payload_save_generated() {
   awk -F'|' -v b="$backend" 'BEGIN{OFS="|"} $1!=b{print}' "$PAYLOAD_GEN_INDEX" 2>/dev/null > "${PAYLOAD_GEN_INDEX}.tmp" || true
   printf "%s|%s|%s|%s|%s\n" "$backend" "$tid" "$ts" "$domains_mode" "$domains_list" >> "${PAYLOAD_GEN_INDEX}.tmp"
   mv "${PAYLOAD_GEN_INDEX}.tmp" "$PAYLOAD_GEN_INDEX" 2>/dev/null || true
+  # mantener payload asociado al backend (meta)
+  backend_meta_set_payload "$backend" "$tid" "$ts" >/dev/null 2>&1 || true
 }
 
 payload_list_generated() {
