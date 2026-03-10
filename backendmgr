@@ -1769,7 +1769,6 @@ speed_limit_choose_rate() {
       fi
       in="${in:-0}"
       in="${in// /}"
-      # Si es número puro -> MB/s
       if [[ "$in" =~ ^[0-9]+$ ]]; then
         if [[ "$in" == "0" ]]; then
           rate="0"
@@ -1782,25 +1781,22 @@ speed_limit_choose_rate() {
       ;;
   esac
 
-  # Validar
   if ! validate_rate "$rate"; then
     echo -e "${YLW}⚠️ Rate inválido:${NC} $rate" >"$O"
     echo -e "${DIM}Usá: 0 (sin límite) o formato nginx: 512k / 2m / 10m${NC}" >"$O"
     return 1
   fi
 
-  printf "%s
-" "$rate"
+  printf "%s\n" "$rate"
   return 0
 }
-
 
 map_get_rate() {
   local file="$1" key="$2" mode="$3"
   [[ -f "$file" ]] || { echo "0"; return 0; }
 
   if [[ "$mode" == "backend" ]]; then
-    awk -v k="$key" '''
+    awk -v k="$key" '
       $1 == "\"" k "\"" {
         gsub(/;$/, "", $2)
         print $2
@@ -1808,9 +1804,9 @@ map_get_rate() {
         exit
       }
       END { if (!found) print "0" }
-    ''' "$file" 2>/dev/null
+    ' "$file" 2>/dev/null
   else
-    awk -v k="$key" '''
+    awk -v k="$key" '
       $1 == k {
         gsub(/;$/, "", $2)
         print $2
@@ -1818,7 +1814,7 @@ map_get_rate() {
         exit
       }
       END { if (!found) print "0" }
-    ''' "$file" 2>/dev/null
+    ' "$file" 2>/dev/null
   fi
 }
 
@@ -1830,22 +1826,19 @@ rate_human() {
 
 speed_limit_list_backends() {
   sanitize_speed_limit_files
-  echo -e "${CYA}Backends y límites actuales${NC}
-"
-  printf "%-4s %-22s %-18s %-6s %-12s
-" "#" "BACKEND" "IP" "PORT" "LÍMITE"
+  echo -e "${CYA}Backends y límites actuales${NC}\n"
+  printf "%-4s %-22s %-18s %-6s %-12s\n" "#" "BACKEND" "IP" "PORT" "LÍMITE"
   echo "----------------------------------------------------------------------------"
 
   local i=0 line key url ipport ip port rate
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     i=$((i+1))
-    key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$//')"
-    url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$//')"
+    key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
+    url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
     ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
     rate="$(map_get_rate "$NGX_LIMITS_BACKEND" "$key" backend)"
-    printf "%-4s %-22s %-18s %-6s %-12s
-" "$i" "$key" "$ip" "$port" "$(rate_human "$rate")"
+    printf "%-4s %-22s %-18s %-6s %-12s\n" "$i" "$key" "$ip" "$port" "$(rate_human "$rate")"
   done < <(backend_lines)
 
   [[ "$i" -eq 0 ]] && echo -e "${YLW}No hay backends cargados.${NC}"
@@ -1853,24 +1846,22 @@ speed_limit_list_backends() {
 
 speed_limit_list_ips() {
   sanitize_speed_limit_files
-  echo -e "${CYA}IPs y límites actuales${NC}
-"
-  printf "%-4s %-18s %-12s
-" "#" "IP" "LÍMITE"
+  echo -e "${CYA}IPs y límites actuales${NC}\n"
+  printf "%-4s %-18s %-12s\n" "#" "IP" "LÍMITE"
   echo "------------------------------------------"
 
   local i=0 line url ipport ip rate
   declare -A seen
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
-    url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$//')"
+    url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
     ipport="${url#http://}"; ip="${ipport%%:*}"
+    [[ -z "$ip" ]] && continue
     [[ -n "${seen[$ip]:-}" ]] && continue
     seen["$ip"]=1
     i=$((i+1))
     rate="$(map_get_rate "$NGX_LIMITS_IP" "$ip" ip)"
-    printf "%-4s %-18s %-12s
-" "$i" "$ip" "$(rate_human "$rate")"
+    printf "%-4s %-18s %-12s\n" "$i" "$ip" "$(rate_human "$rate")"
   done < <(backend_lines)
 
   [[ "$i" -eq 0 ]] && echo -e "${YLW}No hay IPs para mostrar.${NC}"
@@ -1889,7 +1880,7 @@ speed_limit_manage_backend() {
 
   local pick="${lines[$((n-1))]}"
   local key
-  key="$(echo "$pick" | sed -E 's/^\s*"([^"]+)".*$//')"
+  key="$(echo "$pick" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
 
   echo
   echo "1) Editar / aplicar límite"
@@ -1925,7 +1916,7 @@ speed_limit_manage_backend() {
 speed_limit_manage_ip() {
   sanitize_speed_limit_files
   mapfile -t ips < <(
-    backend_lines | sed -E 's/^.*"\s+"http:\/\/([^":]+):([0-9]+)";.*$//' | awk '''NF && !seen[$0]++'''
+    backend_lines | sed -E 's/^.*"\s+"http:\/\/([^":]+):([0-9]+)";.*$/\1/' | awk 'NF && !seen[$0]++'
   )
   [[ "${#ips[@]}" -gt 0 ]] || { echo -e "${YLW}No hay IPs para mostrar.${NC}"; return 0; }
 
