@@ -1715,16 +1715,20 @@ map_set_line() {
 }
 
 speed_limit_choose_rate() {
-  # Devuelve (por stdout) la velocidad para limit_rate:
+  # Devuelve (por stdout) SOLO la velocidad para limit_rate:
   # - manual: acepta "512k", "2m" o "0"
   # - presets: 5m / 10m / 20m / 50m / 0
-  echo -e "${DIM}Elegí velocidad:${NC}"
-  echo "1) Manual (ingresar MB/s o 512k/2m)"
-  echo "2) 5MB/s"
-  echo "3) 10MB/s"
-  echo "4) 20MB/s"
-  echo "5) 50MB/s"
-  echo "6) Sin límites"
+  local O="/dev/stdout"
+  [[ -r /dev/tty && -w /dev/tty ]] && O="/dev/tty"
+
+  echo -e "${DIM}Elegí velocidad:${NC}" >"$O"
+  echo "1) Manual (ingresar MB/s o 512k/2m)" >"$O"
+  echo "2) 5MB/s" >"$O"
+  echo "3) 10MB/s" >"$O"
+  echo "4) 20MB/s" >"$O"
+  echo "5) 50MB/s" >"$O"
+  echo "6) Sin límites" >"$O"
+
   local op in rate
   if [[ -r /dev/tty ]]; then
     read -r -p "Opción (Enter=1): " op </dev/tty
@@ -1762,12 +1766,13 @@ speed_limit_choose_rate() {
 
   # Validar
   if ! validate_rate "$rate"; then
-    echo -e "${YLW}⚠️ Rate inválido:${NC} $rate"
-    echo -e "${DIM}Usá: 0 (sin límite) o formato nginx: 512k / 2m / 10m${NC}"
+    echo -e "${YLW}⚠️ Rate inválido:${NC} $rate" >"$O"
+    echo -e "${DIM}Usá: 0 (sin límite) o formato nginx: 512k / 2m / 10m${NC}" >"$O"
     return 1
   fi
 
-  echo "$rate"
+  printf "%s
+" "$rate"
   return 0
 }
 
