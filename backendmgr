@@ -1795,12 +1795,190 @@ speed_limit_choose_rate() {
 }
 
 
+map_get_rate() {
+  local file="$1" key="$2" mode="$3"
+  [[ -f "$file" ]] || { echo "0"; return 0; }
+
+  if [[ "$mode" == "backend" ]]; then
+    awk -v k="$key" '''
+      $1 == "\"" k "\"" {
+        gsub(/;$/, "", $2)
+        print $2
+        found=1
+        exit
+      }
+      END { if (!found) print "0" }
+    ''' "$file" 2>/dev/null
+  else
+    awk -v k="$key" '''
+      $1 == k {
+        gsub(/;$/, "", $2)
+        print $2
+        found=1
+        exit
+      }
+      END { if (!found) print "0" }
+    ''' "$file" 2>/dev/null
+  fi
+}
+
+rate_human() {
+  local r="${1:-0}"
+  [[ "$r" == "0" || -z "$r" ]] && { echo "sin límite"; return 0; }
+  echo "$r"
+}
+
+speed_limit_list_backends() {
+  sanitize_speed_limit_files
+  echo -e "${CYA}Backends y límites actuales${NC}
+"
+  printf "%-4s %-22s %-18s %-6s %-12s
+" "#" "BACKEND" "IP" "PORT" "LÍMITE"
+  echo "----------------------------------------------------------------------------"
+
+  local i=0 line key url ipport ip port rate
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    i=$((i+1))
+    key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$//')"
+    url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$//')"
+    ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
+    rate="$(map_get_rate "$NGX_LIMITS_BACKEND" "$key" backend)"
+    printf "%-4s %-22s %-18s %-6s %-12s
+" "$i" "$key" "$ip" "$port" "$(rate_human "$rate")"
+  done < <(backend_lines)
+
+  [[ "$i" -eq 0 ]] && echo -e "${YLW}No hay backends cargados.${NC}"
+}
+
+speed_limit_list_ips() {
+  sanitize_speed_limit_files
+  echo -e "${CYA}IPs y límites actuales${NC}
+"
+  printf "%-4s %-18s %-12s
+" "#" "IP" "LÍMITE"
+  echo "------------------------------------------"
+
+  local i=0 line url ipport ip rate
+  declare -A seen
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$//')"
+    ipport="${url#http://}"; ip="${ipport%%:*}"
+    [[ -n "${seen[$ip]:-}" ]] && continue
+    seen["$ip"]=1
+    i=$((i+1))
+    rate="$(map_get_rate "$NGX_LIMITS_IP" "$ip" ip)"
+    printf "%-4s %-18s %-12s
+" "$i" "$ip" "$(rate_human "$rate")"
+  done < <(backend_lines)
+
+  [[ "$i" -eq 0 ]] && echo -e "${YLW}No hay IPs para mostrar.${NC}"
+}
+
+speed_limit_manage_backend() {
+  sanitize_speed_limit_files
+  mapfile -t lines < <(backend_lines)
+  [[ "${#lines[@]}" -gt 0 ]] || { echo -e "${YLW}No hay backends cargados.${NC}"; return 0; }
+
+  speed_limit_list_backends
+  echo
+  read -r -p "Número de backend: " n
+  [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${RED}Inválido.${NC}"; return 0; }
+  (( n>=1 && n<=${#lines[@]} )) || { echo -e "${RED}Fuera de rango.${NC}"; return 0; }
+
+  local pick="${lines[$((n-1))]}"
+  local key
+  key="$(echo "$pick" | sed -E 's/^\s*"([^"]+)".*$//')"
+
+  echo
+  echo "1) Editar / aplicar límite"
+  echo "2) Quitar límite"
+  read -r -p "Opción: " mop
+  case "$mop" in
+    1)
+      local rate
+      if ! rate="$(speed_limit_choose_rate)"; then
+        return 0
+      fi
+      sanitize_speed_limit_files
+      map_set_line "$NGX_LIMITS_BACKEND" "$key" "$rate" "quote"
+      ensure_http_conf_maps
+      write_apply_conf
+      nginx_test_reload
+      echo -e "${GRN}✅ OK.${NC}  ${DIM}Backend=${key} rate=${rate}${NC}"
+      ;;
+    2)
+      sanitize_speed_limit_files
+      map_set_line "$NGX_LIMITS_BACKEND" "$key" "0" "quote"
+      ensure_http_conf_maps
+      write_apply_conf
+      nginx_test_reload
+      echo -e "${GRN}✅ Límite quitado.${NC}  ${DIM}Backend=${key}${NC}"
+      ;;
+    *)
+      echo -e "${YLW}Opción inválida.${NC}"
+      ;;
+  esac
+}
+
+speed_limit_manage_ip() {
+  sanitize_speed_limit_files
+  mapfile -t ips < <(
+    backend_lines | sed -E 's/^.*"\s+"http:\/\/([^":]+):([0-9]+)";.*$//' | awk '''NF && !seen[$0]++'''
+  )
+  [[ "${#ips[@]}" -gt 0 ]] || { echo -e "${YLW}No hay IPs para mostrar.${NC}"; return 0; }
+
+  speed_limit_list_ips
+  echo
+  read -r -p "Número de IP: " n
+  [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${RED}Inválido.${NC}"; return 0; }
+  (( n>=1 && n<=${#ips[@]} )) || { echo -e "${RED}Fuera de rango.${NC}"; return 0; }
+
+  local ip="${ips[$((n-1))]}"
+
+  echo
+  echo "1) Editar / aplicar límite"
+  echo "2) Quitar límite"
+  read -r -p "Opción: " mop
+  case "$mop" in
+    1)
+      local rate
+      if ! rate="$(speed_limit_choose_rate)"; then
+        return 0
+      fi
+      sanitize_speed_limit_files
+      map_set_line "$NGX_LIMITS_IP" "$ip" "$rate" "noquote"
+      ensure_http_conf_maps
+      write_apply_conf
+      nginx_test_reload
+      echo -e "${GRN}✅ OK.${NC}  ${DIM}IP=${ip} rate=${rate}${NC}"
+      ;;
+    2)
+      sanitize_speed_limit_files
+      map_set_line "$NGX_LIMITS_IP" "$ip" "0" "noquote"
+      ensure_http_conf_maps
+      write_apply_conf
+      nginx_test_reload
+      echo -e "${GRN}✅ Límite quitado.${NC}  ${DIM}IP=${ip}${NC}"
+      ;;
+    *)
+      echo -e "${YLW}Opción inválida.${NC}"
+      ;;
+  esac
+}
+
 speed_limit_menu() {
   echo -e "${CYA}Limitar ancho de banda (limit_rate)${NC}"
-  echo -e "${DIM}Podés elegir manual o presets: 5MB/s, 10MB/s, 20MB/s, 50MB/s o sin límite.${NC}\n"
+  echo -e "${DIM}Podés elegir manual o presets: 5MB/s, 10MB/s, 20MB/s, 50MB/s o sin límite.${NC}
+"
   echo "1) Limitar por IP"
   echo "2) Limitar por Backend"
-  echo "3) Limpiar límites (IP y Backend)"
+  echo "3) 📋 Ver lista de Backends y sus límites"
+  echo "4) 📋 Ver lista de IPs y sus límites"
+  echo "5) ✏️  Editar / quitar límite por Backend"
+  echo "6) ✏️  Editar / quitar límite por IP"
+  echo "7) 🧹 Limpiar límites (IP y Backend)"
   read -r -p "Opción: " op
   echo
   case "$op" in
@@ -1839,6 +2017,22 @@ speed_limit_menu() {
       return 0
       ;;
     3)
+      speed_limit_list_backends
+      return 0
+      ;;
+    4)
+      speed_limit_list_ips
+      return 0
+      ;;
+    5)
+      speed_limit_manage_backend
+      return 0
+      ;;
+    6)
+      speed_limit_manage_ip
+      return 0
+      ;;
+    7)
       sanitize_speed_limit_files
       : > "$NGX_LIMITS_IP"
       : > "$NGX_LIMITS_BACKEND"
