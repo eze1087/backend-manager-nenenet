@@ -1875,73 +1875,79 @@ speed_limit_list_ips() {
 
 speed_limit_pick_backend_or_manual() {
   mapfile -t lines < <(backend_lines)
-  echo "1) Elegir backend de la lista"
-  echo "2) Ingresar backend manual"
-  read -r -p "Opción (Enter=1): " src
-  src="${src:-1}"
+  local O="/dev/stdout"
+  [[ -r /dev/tty && -w /dev/tty ]] && O="/dev/tty"
 
-  case "$src" in
-    2)
-      local key
+  [[ "${#lines[@]}" -gt 0 ]] || { echo -e "${YLW}No hay backends cargados.${NC}" >"$O"; return 1; }
+
+  echo -e "${CYA}Elegí el backend a limitar:${NC}" >"$O"
+  echo -e "${DIM}Podés escribir el número de la lista o M para ingresarlo manualmente.${NC}\n" >"$O"
+  speed_limit_list_backends >"$O"
+  echo "" >"$O"
+
+  local n pick key
+  if [[ -r /dev/tty ]]; then
+    read -r -p "Número de backend (o M manual): " n </dev/tty
+  else
+    read -r -p "Número de backend (o M manual): " n
+  fi
+  n="${n:-}"
+
+  if [[ "${n^^}" == "M" ]]; then
+    if [[ -r /dev/tty ]]; then
+      read -r -p "Backend (ej svpnene38): " key </dev/tty
+    else
       read -r -p "Backend (ej svpnene38): " key
-      validate_key "$key" || { echo -e "${RED}Backend inválido.${NC}" >/dev/tty 2>/dev/null || true; return 1; }
-      printf "%s\n" "$key"
-      return 0
-      ;;
-    *)
-      [[ "${#lines[@]}" -gt 0 ]] || { echo -e "${YLW}No hay backends cargados.${NC}" >/dev/tty 2>/dev/null || true; return 1; }
-      echo
-      speed_limit_list_backends >/dev/tty 2>/dev/null || speed_limit_list_backends
-      echo >/dev/tty 2>/dev/null || true
-      local n pick key
-      if [[ -r /dev/tty ]]; then
-        read -r -p "Número de backend: " n </dev/tty
-      else
-        read -r -p "Número de backend: " n
-      fi
-      [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${RED}Inválido.${NC}" >/dev/tty 2>/dev/null || true; return 1; }
-      (( n>=1 && n<=${#lines[@]} )) || { echo -e "${RED}Fuera de rango.${NC}" >/dev/tty 2>/dev/null || true; return 1; }
-      pick="${lines[$((n-1))]}"
-      key="$(echo "$pick" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
-      printf "%s\n" "$key"
-      return 0
-      ;;
-  esac
+    fi
+    validate_key "$key" || { echo -e "${RED}Backend inválido.${NC}" >"$O"; return 1; }
+    printf "%s\n" "$key"
+    return 0
+  fi
+
+  [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${RED}Inválido.${NC}" >"$O"; return 1; }
+  (( n>=1 && n<=${#lines[@]} )) || { echo -e "${RED}Fuera de rango.${NC}" >"$O"; return 1; }
+  pick="${lines[$((n-1))]}"
+  key="$(echo "$pick" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
+  printf "%s\n" "$key"
+  return 0
 }
 
 speed_limit_pick_ip_or_manual() {
   mapfile -t ips < <(backend_lines | sed -E 's/^.*"\s+"http:\/\/([^":]+):([0-9]+)";.*$/\1/' | awk 'NF && !seen[$0]++')
-  echo "1) Elegir IP de la lista"
-  echo "2) Ingresar IP manual"
-  read -r -p "Opción (Enter=1): " src
-  src="${src:-1}"
+  local O="/dev/stdout"
+  [[ -r /dev/tty && -w /dev/tty ]] && O="/dev/tty"
 
-  case "$src" in
-    2)
-      local ip
+  [[ "${#ips[@]}" -gt 0 ]] || { echo -e "${YLW}No hay IPs cargadas.${NC}" >"$O"; return 1; }
+
+  echo -e "${CYA}Elegí la IP a limitar:${NC}" >"$O"
+  echo -e "${DIM}Podés escribir el número de la lista o M para ingresarla manualmente.${NC}\n" >"$O"
+  speed_limit_list_ips >"$O"
+  echo "" >"$O"
+
+  local n ip
+  if [[ -r /dev/tty ]]; then
+    read -r -p "Número de IP (o M manual): " n </dev/tty
+  else
+    read -r -p "Número de IP (o M manual): " n
+  fi
+  n="${n:-}"
+
+  if [[ "${n^^}" == "M" ]]; then
+    if [[ -r /dev/tty ]]; then
+      read -r -p "IP: " ip </dev/tty
+    else
       read -r -p "IP: " ip
-      validate_ip "$ip" || { echo -e "${RED}IP inválida.${NC}" >/dev/tty 2>/dev/null || true; return 1; }
-      printf "%s\n" "$ip"
-      return 0
-      ;;
-    *)
-      [[ "${#ips[@]}" -gt 0 ]] || { echo -e "${YLW}No hay IPs cargadas.${NC}" >/dev/tty 2>/dev/null || true; return 1; }
-      echo
-      speed_limit_list_ips >/dev/tty 2>/dev/null || speed_limit_list_ips
-      echo >/dev/tty 2>/dev/null || true
-      local n ip
-      if [[ -r /dev/tty ]]; then
-        read -r -p "Número de IP: " n </dev/tty
-      else
-        read -r -p "Número de IP: " n
-      fi
-      [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${RED}Inválido.${NC}" >/dev/tty 2>/dev/null || true; return 1; }
-      (( n>=1 && n<=${#ips[@]} )) || { echo -e "${RED}Fuera de rango.${NC}" >/dev/tty 2>/dev/null || true; return 1; }
-      ip="${ips[$((n-1))]}"
-      printf "%s\n" "$ip"
-      return 0
-      ;;
-  esac
+    fi
+    validate_ip "$ip" || { echo -e "${RED}IP inválida.${NC}" >"$O"; return 1; }
+    printf "%s\n" "$ip"
+    return 0
+  fi
+
+  [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${RED}Inválido.${NC}" >"$O"; return 1; }
+  (( n>=1 && n<=${#ips[@]} )) || { echo -e "${RED}Fuera de rango.${NC}" >"$O"; return 1; }
+  ip="${ips[$((n-1))]}"
+  printf "%s\n" "$ip"
+  return 0
 }
 
 speed_limit_manage_backend() {
