@@ -2095,7 +2095,7 @@ speed_limit_apply_all_backends() {
   sanitize_speed_limit_files
   for line in "${lines[@]}"; do
     [[ -z "$line" ]] && continue
-    key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$//')"
+    key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
     [[ -z "$key" ]] && continue
     map_set_line "$NGX_LIMITS_BACKEND" "$key" "$rate" "quote"
     count=$((count+1))
