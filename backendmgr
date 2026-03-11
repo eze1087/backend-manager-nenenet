@@ -2095,7 +2095,7 @@ speed_limit_apply_all_backends() {
   sanitize_speed_limit_files
   for line in "${lines[@]}"; do
     [[ -z "$line" ]] && continue
-    key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
+    key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$//')"
     [[ -z "$key" ]] && continue
     map_set_line "$NGX_LIMITS_BACKEND" "$key" "$rate" "quote"
     count=$((count+1))
@@ -2879,52 +2879,47 @@ payload_init_defaults() {
   mkdir -p "$PAYLOAD_DIR" >/dev/null 2>&1 || true
   [[ -f "$PAYLOAD_INDEX" ]] || : > "$PAYLOAD_INDEX"
 
-  def_ok() {
-    local id="$1"
-    grep -qE "^${id}\\|" "$PAYLOAD_INDEX" 2>/dev/null || return 1
-    [[ -s "$(payload_tpl_file "$id")" ]] || return 1
-    return 0
-  }
+  local defaults_ver_file="${PAYLOAD_DIR}/defaults.version"
+  local defaults_ver="2026-03-support-rotate-v2"
 
-  add_def() {
+  payload_set_def() {
     local id="$1" name="$2"; shift 2
     local content="$*"
-    grep -qE "^${id}\\|" "$PAYLOAD_INDEX" 2>/dev/null || echo "${id}|${name}" >> "$PAYLOAD_INDEX"
-    [[ -s "$(payload_tpl_file "$id")" ]] || printf "%s
-" "$content" > "$(payload_tpl_file "$id")"
+    awk -F'|' -v id="$id" 'BEGIN{OFS="|"} $1!=id{print}' "$PAYLOAD_INDEX" 2>/dev/null > "${PAYLOAD_INDEX}.tmp" || true
+    printf "%s|%s\n" "$id" "$name" >> "${PAYLOAD_INDEX}.tmp"
+    mv "${PAYLOAD_INDEX}.tmp" "$PAYLOAD_INDEX" 2>/dev/null || true
+    printf "%s\n" "$content" > "$(payload_tpl_file "$id")"
   }
 
-  # Placeholders soportados:
-  #  {MOTHERS_ROTATE} -> [rotate=dom1;dom2;dom3]
-  #  {MOTHERS_LIST}   -> dom1;dom2;dom3
-  #  {HEADER}         -> header actual (ej Backend)
-  #  {BACKEND}        -> backend elegido
+  if [[ ! -f "$defaults_ver_file" ]] || [[ "$(cat "$defaults_ver_file" 2>/dev/null || true)" != "$defaults_ver" ]]; then
+    payload_set_def 1 "Payload 1 (GET + soporte)" \
+'GET / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][split]
+OPTION / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROTATE_SUPPORT}[crlf]Backend: .......... [lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]'
 
-  if ! def_ok 1; then
-    add_def 1 "Payload 1 (GET)" \
-"GET / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][split]
-OPTION / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROTATE}[crlf]{HEADER}:{BACKEND}[lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
+    payload_set_def 2 "Payload 2 (ACL + soporte)" \
+'ACL / HTTP/1.1[crlf]Host:recargas.personal.com.ar[crlf][crlf][split]
+OPTION / HTTP/1.1[crlf]Host: www.personal.com.ar[crlf][crlf][crlf]GET / HTTP/1.1[crlf]Host:{MOTHERS_ROTATE_SUPPORT}[crlf]Backend:..........[lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]'
+
+    payload_set_def 3 "Payload 3 (Rotate + soporte)" \
+'[rotate=HEAD;COPY;ACL] / HTTP/1.1[crlf]Host: www.personal.com.ar[crlf][crlf][split]
+OPTION / HTTP/1.1[crlf]Host: www.personal.com.ar[crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROTATE_SUPPORT} [crlf]Backend: ........... [lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]'
+
+    payload_set_def 4 "Payload 4 (Rotate2 + soporte)" \
+'[rotate=ACL;GET;COPY] / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][split]
+OPTION / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROTATE_SUPPORT}[crlf]Backend:.......... [lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]'
+
+    payload_set_def 5 "Payload 5 (NPV Tunnel + soporte)" \
+'GET / HTTP/1.1[crlf]Host: recargas.personal.com.ar[crlf][crlf][split]
+OPTION / HTTP/1.1[crlf]Host: recargas.personal.com.ar[crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROTATE_SUPPORT}[crlf]Backend: ........ [crlf] Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]'
+
+    payload_set_def 6 "Payload 6 (GET // + soporte)" \
+'GET //  HTTP/1.1[lf]Host: recargas.personal.com.ar[lf]Expect: 911-continue[crlf][crlf][split][crlf][crlf]GET- // HTTP/1.1[crlf]Host:{MOTHERS_ROTATE_SUPPORT}[crlf]Backend: ........[crlf]Connection: Upgrade[crlf]-_-[crlf]Upgrade: websocket[crlf][crlf]'
+
+    printf "%s\n" "$defaults_ver" > "$defaults_ver_file"
   fi
-  if ! def_ok 2; then
-    add_def 2 "Payload 2 (ACL)" \
-"ACL / HTTP/1.1[crlf]Host: recargas.personal.com.ar[crlf][crlf][split]
-OPTION / HTTP/1.1[crlf]Host: www.personal.com.ar[crlf][crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_LIST}[crlf]{HEADER}:{BACKEND}[lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
-  fi
-  if ! def_ok 3; then
-    add_def 3 "Payload 3 (Rotate)" \
-"[rotate=HEAD;COPY;ACL] / HTTP/1.1[crlf]Host: www.personal.com.ar[crlf][crlf][split]
-OPTION / HTTP/1.1[crlf]Host: www.personal.com.ar[crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROTATE}[crlf]{HEADER}:{BACKEND}[lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
-  fi
-  if ! def_ok 4; then
-    add_def 4 "Payload 4 (Rotate2)" \
-"[rotate=ACL;GET;COPY] / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][split]
-OPTION / HTTP/1.1[crlf]Host: *.personal.com.ar[crlf][crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROTATE}[crlf]{HEADER}:{BACKEND}[lf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
-  fi
-  if ! def_ok 5; then
-    add_def 5 "Payload 5 (NPV Tunnel)" \
-"GET / HTTP/1.1[crlf]Host: recargas.personal.com.ar[crlf][crlf][split]
-OPTION / HTTP/1.1[crlf]Host: recargas.personal.com.ar[crlf][crlf]GET / HTTP/1.1[crlf]Host: {MOTHERS_ROTATE}[crlf]{HEADER}:{BACKEND}[crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
-  fi
+
+  [[ -f "$PAYLOAD_DOMAINS_FILE" ]] || : > "$PAYLOAD_DOMAINS_FILE"
+  [[ -f "$PAYLOAD_LAST_FILE" ]] || : > "$PAYLOAD_LAST_FILE"
 }
 
 payload_domains_from_panel() {
@@ -2981,7 +2976,30 @@ payload_domains_rotate() {
   local list
   list="$(payload_domains_join_semicolon)"
   [[ -z "$list" ]] && { echo "[rotate=]"; return 0; }
-  # si hay 1 solo, igual lo envuelvo (mantiene formato)
+  echo "[rotate=${list}]"
+}
+
+payload_append_support_to_list() {
+  local list="${1:-}"
+  local support="soporte.nenenet.com.ar"
+  list="${list// /}"
+  if [[ -z "$list" ]]; then
+    echo "$support"
+    return 0
+  fi
+  case ";${list};" in
+    *";${support};"*) echo "$list" ;;
+    *) echo "${list};${support}" ;;
+  esac
+}
+
+payload_domains_with_support_list() {
+  payload_append_support_to_list "$(payload_domains_join_semicolon)"
+}
+
+payload_domains_with_support_rotate() {
+  local list
+  list="$(payload_domains_with_support_list)"
   echo "[rotate=${list}]"
 }
 
@@ -2996,7 +3014,6 @@ payload_out() {
 
 payload_print_block() {
   # Imprime un bloque "copiable" para Termius/Bitvise.
-  # ✅ Tip: seleccioná desde [START_PAYLOAD] hasta [END_PAYLOAD] y copiá.
   local payload="$1"
   local O; O="$(payload_out)"
 
@@ -3007,8 +3024,6 @@ payload_print_block() {
   echo "[END_PAYLOAD]" >"$O"
   echo >"$O"
 }
-
-
 
 payload_list_templates() {
   payload_init_defaults
@@ -3104,25 +3119,31 @@ payload_render() {
   local dom_rot_override="${4:-}"
   local hdr="$HEADER_NAME"
 
-  local dom_list dom_rot
+  local dom_list dom_rot dom_list_support dom_rot_support
   if [[ -n "$dom_list_override" ]]; then
-    dom_list="$dom_list_override"
-    dom_rot="${dom_rot_override:-[rotate=${dom_list_override}]}"
+    dom_list="${dom_list_override// /}"
+    dom_rot="${dom_rot_override:-[rotate=${dom_list}]}"
   else
     dom_list="$(payload_domains_join_semicolon)"
     dom_rot="$(payload_domains_rotate)"
   fi
 
+  dom_list_support="$(payload_append_support_to_list "$dom_list")"
+  dom_rot_support="[rotate=${dom_list_support}]"
+
   local out
   out="$(printf "%s" "$tpl" | sed \
     -e "s/{HEADER}/${hdr}/g" \
     -e "s/{BACKEND}/${backend}/g" \
-    -e "s/{MOTHERS_LIST}/${dom_list}/g" \
-    -e "s/{MOTHERS_ROTATE}/${dom_rot}/g")"
+    -e "s|{MOTHERS_LIST_SUPPORT}|${dom_list_support}|g" \
+    -e "s|{MOTHERS_ROTATE_SUPPORT}|${dom_rot_support}|g" \
+    -e "s|{MOTHERS_LIST}|${dom_list}|g" \
+    -e "s|{MOTHERS_ROTATE}|${dom_rot}|g")"
 
   out="$(printf "%s" "$out" | sed -E \
-    -e "s/(${hdr}|Backend):[[:space:]]*\.+/\\1:${backend}/g" \
-    -e "s/(${hdr}|Backend):[[:space:]]*\.{2,}/\\1:${backend}/g")"
+    -e "s/(${hdr}|Backend):[[:space:]]*\.{2,}[[:space:]]*/\\1:${backend}/g" \
+    -e "s/\[rotate=\.+;soporte\.nenenet\.com\.ar\]/${dom_rot_support//\//\\/}/g" \
+    -e "s/\[rotate=\.+\.\.+;soporte\.nenenet\.com\.ar\]/${dom_rot_support//\//\\/}/g")"
 
   printf "%s\n" "$out"
 }
