@@ -1891,23 +1891,21 @@ speed_limit_list_ips() {
   printf "%-4s %-18s %-12s\n" "#" "IP" "LÍMITE"
   echo "------------------------------------------"
 
-  local i=0 line url ipport ip rate
-  declare -A seen
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
-    ipport="${url#http://}"; ip="${ipport%%:*}"
-    [[ -z "$ip" ]] && continue
-    [[ -n "${seen[$ip]:-}" ]] && continue
-    seen["$ip"]=1
-    i=$((i+1))
-    rate="$(speed_limit_effective_ip_rate "$ip")"
-    printf "%-4s %-18s %-12s\n" "$i" "$ip" "$(rate_human "$rate")"
-  done < <(backend_lines)
+  local i=0 ip rate
+  mapfile -t ips < <(backend_lines | sed -E 's/^.*"\s+"http:\/\/([^":]+):([0-9]+)";.*$/\1/' | awk 'NF && !seen[$0]++')
 
-  if [[ "$i" -eq 0 ]]; then
+  if [[ "${#ips[@]}" -eq 0 ]]; then
     echo -e "${YLW}No hay IPs para mostrar.${NC}"
+    return 0
   fi
+
+  for ip in "${ips[@]}"; do
+    [[ -z "$ip" ]] && continue
+    i=$((i+1))
+    rate="$(speed_limit_effective_ip_rate "$ip" 2>/dev/null || printf '0')"
+    printf "%-4s %-18s %-12s\n" "$i" "$ip" "$(rate_human "$rate")"
+  done
+
   return 0
 }
 
@@ -2080,6 +2078,35 @@ speed_limit_manage_ip() {
   esac
 }
 
+speed_limit_apply_all_backends() {
+  sanitize_speed_limit_files
+  mapfile -t lines < <(backend_lines)
+  [[ "${#lines[@]}" -gt 0 ]] || { echo -e "${YLW}No hay backends cargados.${NC}"; return 0; }
+
+  echo -e "${CYA}Limitar TODOS los backends${NC}"
+  echo -e "${DIM}Se aplicará el mismo límite a todos los backends cargados.${NC}
+"
+
+  local rate key count=0 line
+  if ! rate="$(speed_limit_choose_rate)"; then
+    return 0
+  fi
+
+  sanitize_speed_limit_files
+  for line in "${lines[@]}"; do
+    [[ -z "$line" ]] && continue
+    key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$//')"
+    [[ -z "$key" ]] && continue
+    map_set_line "$NGX_LIMITS_BACKEND" "$key" "$rate" "quote"
+    count=$((count+1))
+  done
+
+  ensure_http_conf_maps
+  write_apply_conf
+  nginx_test_reload
+  echo -e "${GRN}✅ OK.${NC}  ${DIM}Backends actualizados=${count} rate=${rate}${NC}"
+}
+
 speed_limit_menu() {
   echo -e "${CYA}Limitar ancho de banda (limit_rate)${NC}"
   echo -e "${DIM}Podés elegir manual o presets: 5MB/s, 10MB/s, 20MB/s, 50MB/s o sin límite.${NC}
@@ -2091,6 +2118,7 @@ speed_limit_menu() {
   echo "5) ✏️  Editar / quitar límite por Backend"
   echo "6) ✏️  Editar / quitar límite por IP"
   echo "7) 🧹 Limpiar límites (IP y Backend)"
+  echo "8) 🚀 Limitar TODOS los backends"
   read -r -p "Opción: " op
   echo
   case "$op" in
@@ -2156,6 +2184,10 @@ speed_limit_menu() {
       write_apply_conf
       nginx_test_reload
       echo -e "${GRN}✅ Límites limpiados.${NC}"
+      return 0
+      ;;
+    8)
+      speed_limit_apply_all_backends
       return 0
       ;;
     *) echo -e "${YLW}Opción inválida${NC}"; return 0 ;;
