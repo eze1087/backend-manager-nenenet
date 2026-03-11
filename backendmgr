@@ -1847,6 +1847,44 @@ speed_limit_list_backends() {
   return 0
 }
 
+
+speed_limit_effective_ip_rate() {
+  local ip="$1"
+  local ip_rate backend_rate rate_list uniq_count uniq_rate
+  ip_rate="$(map_get_rate "$NGX_LIMITS_IP" "$ip" ip)"
+  if [[ -n "$ip_rate" && "$ip_rate" != "0" ]]; then
+    printf "%s\n" "$ip_rate"
+    return 0
+  fi
+
+  rate_list="$(
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      local_key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
+      local_url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
+      local_ipport="${local_url#http://}"
+      local_ip="${local_ipport%%:*}"
+      [[ "$local_ip" == "$ip" ]] || continue
+      backend_rate="$(map_get_rate "$NGX_LIMITS_BACKEND" "$local_key" backend)"
+      [[ -n "$backend_rate" && "$backend_rate" != "0" ]] && printf "%s\n" "$backend_rate"
+    done < <(backend_lines)
+  )"
+
+  if [[ -z "${rate_list// }" ]]; then
+    printf "0\n"
+    return 0
+  fi
+
+  uniq_count="$(printf "%s\n" "$rate_list" | awk 'NF && !seen[$0]++{c++} END{print c+0}')"
+  uniq_rate="$(printf "%s\n" "$rate_list" | awk 'NF && !seen[$0]++{print; exit}')"
+
+  if [[ "$uniq_count" -le 1 ]]; then
+    printf "%s\n" "$uniq_rate"
+  else
+    printf "mixto\n"
+  fi
+}
+
 speed_limit_list_ips() {
   sanitize_speed_limit_files
   echo -e "${CYA}IPs y límites actuales${NC}\n"
@@ -1863,7 +1901,7 @@ speed_limit_list_ips() {
     [[ -n "${seen[$ip]:-}" ]] && continue
     seen["$ip"]=1
     i=$((i+1))
-    rate="$(map_get_rate "$NGX_LIMITS_IP" "$ip" ip)"
+    rate="$(speed_limit_effective_ip_rate "$ip")"
     printf "%-4s %-18s %-12s\n" "$i" "$ip" "$(rate_human "$rate")"
   done < <(backend_lines)
 
