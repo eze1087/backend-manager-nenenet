@@ -3098,15 +3098,21 @@ client_list_table() {
 }
 
 client_pick_key() {
-  local __var="${1:-}" n key
+  local __var="${1:-}" n picked_key
+  local -a __lines=()
   client_list_table || { echo -e "${YLW}No hay backends cargados.${NC}"; return 1; }
   echo
   read -r -p "Número: " n
   [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${YLW}Inválido.${NC}"; return 1; }
   mapfile -t __lines < <(backend_lines)
   (( n>=1 && n<=${#__lines[@]} )) || { echo -e "${YLW}Fuera de rango.${NC}"; return 1; }
-  key="$(echo "${__lines[$((n-1))]}" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
-  if [[ -n "$__var" ]]; then printf -v "$__var" "%s" "$key"; else echo "$key"; fi
+  picked_key="$(echo "${__lines[$((n-1))]}" | sed -E 's/^\s*"([^"]+)".*$//')"
+  [[ -n "$picked_key" ]] || { echo -e "${YLW}Backend inválido.${NC}"; return 1; }
+  if [[ -n "$__var" ]]; then
+    printf -v "$__var" "%s" "$picked_key"
+  else
+    echo "$picked_key"
+  fi
   return 0
 }
 
