@@ -54,6 +54,9 @@ TRAFFIC_DB_IP="${STATE_DIR}/traffic_ip.db"
 TRAFFIC_DB_BACKEND="${STATE_DIR}/traffic_backend.db"
 TRAFFIC_DB_LAST_RUN="${STATE_DIR}/traffic_last_run"
 BACKEND_META_FILE="${STATE_DIR}/backends.meta"
+CLIENT_PRICE_FILE="${STATE_DIR}/client_prices.db"
+CLIENT_PRICE_DEFAULT_FILE="${STATE_DIR}/client_price_default"
+CLIENT_PAYMENT_FILE="${STATE_DIR}/client_payments.db"
 
 
 # ------------------ COLORES ------------------
@@ -170,6 +173,9 @@ ensure_files() {
   [[ -f "$TRAFFIC_DB_BACKEND" ]] || : > "$TRAFFIC_DB_BACKEND"
   [[ -f "$TRAFFIC_DB_LAST_RUN" ]] || : > "$TRAFFIC_DB_LAST_RUN"
   [[ -f "$BACKEND_META_FILE" ]] || : > "$BACKEND_META_FILE"
+  [[ -f "$CLIENT_PRICE_FILE" ]] || : > "$CLIENT_PRICE_FILE"
+  [[ -f "$CLIENT_PRICE_DEFAULT_FILE" ]] || : > "$CLIENT_PRICE_DEFAULT_FILE"
+  [[ -f "$CLIENT_PAYMENT_FILE" ]] || : > "$CLIENT_PAYMENT_FILE"
 
   chmod 700 "$BACKUP_DIR" || true
 
@@ -2466,6 +2472,19 @@ backend_meta_get() {
   grep -E "^${k}\|" "$BACKEND_META_FILE" 2>/dev/null | tail -n 1
 }
 
+backend_lookup_ipport() {
+  local key="$1"
+  local line url ipport ip port
+  line="$(backend_lines | awk -v k="$key" '
+    match($0, /^[ \t]*"([^"]+)"/, m){
+      if(m[1]==k){ print; exit }
+    }' 2>/dev/null || true)"
+  [[ -n "$line" ]] || { echo ""; return 0; }
+  url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
+  ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
+  echo "${ip}|${port}"
+}
+
 backend_meta_upsert() {
   # Compat:
   #  A) backend_meta_upsert key ip port created expires
@@ -2479,30 +2498,45 @@ backend_meta_upsert() {
     local line nf
     line="$(backend_meta_get "$k" 2>/dev/null || true)"
     if [[ -n "$line" ]]; then
-      nf="$(echo "$line" | awk -F'|' '{print NF}')"
+      nf="$(echo "$line" | awk -F'|' '{print NF}' 2>/dev/null || echo 0)"
       if [[ "${nf:-0}" -ge 6 ]]; then
         client="$(echo "$line" | awk -F'|' '{print $2}')"
         payload_tpl="$(echo "$line" | awk -F'|' '{print $7}')"
-        payloa
-backend_lookup_ipport() {
-  # echo "ip|port" o "" si no existe
-  local key="$1"
-  local line url ipport ip port
-  line="$(backend_lines | awk -v k="$key" '
-    match($0, /^[ \t]*"([^"]+)"/, m){
-      if(m[1]==k){ print; exit }
-    }' 2>/dev/null || true)"
-  [[ -n "$line" ]] || { echo ""; return 0; }
-  url="$(echo "$line" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
-  ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
-  echo "${ip}|${port}"
+        payload_ts="$(echo "$line" | awk -F'|' '{print $8}')"
+      fi
+    fi
+  else
+    client="${2:-"-"}"; ip="${3:-}"; port="${4:-}"; created="${5:-0}"; expires="${6:-0}"
+    payload_tpl="${7:-"-"}"; payload_ts="${8:-0}"
+  fi
+
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  [[ -f "$BACKEND_META_FILE" ]] || : > "$BACKEND_META_FILE"
+
+  client="${client//|/-}"
+  client="$(echo "$client" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+  [[ -z "$client" ]] && client="-"
+  [[ -z "$payload_tpl" ]] && payload_tpl="-"
+  [[ -z "$payload_ts" ]] && payload_ts="0"
+
+  if [[ -z "$ip" || -z "$port" ]]; then
+    local ipport
+    ipport="$(backend_lookup_ipport "$k")"
+    [[ -z "$ip" ]] && ip="${ipport%%|*}"
+    [[ -z "$port" ]] && port="${ipport##*|}"
+  fi
+
+  grep -v -E "^${k}\|" "$BACKEND_META_FILE" > "${BACKEND_META_FILE}.tmp" 2>/dev/null || true
+  printf "%s|%s|%s|%s|%s|%s|%s|%s\n" "$k" "$client" "$ip" "$port" "$created" "$expires" "$payload_tpl" "$payload_ts" >> "${BACKEND_META_FILE}.tmp"
+  mv -f "${BACKEND_META_FILE}.tmp" "$BACKEND_META_FILE" 2>/dev/null || true
+  backend_meta_normalize
 }
 
 backend_meta_get_client() {
   local key="$1" line nf
   line="$(backend_meta_get "$key" 2>/dev/null || true)"
   [[ -n "$line" ]] || { echo "-"; return 0; }
-  nf="$(echo "$line" | awk -F'|' '{print NF}')"
+  nf="$(echo "$line" | awk -F'|' '{print NF}' 2>/dev/null || echo 0)"
   if [[ "${nf:-0}" -ge 6 ]]; then
     echo "$line" | awk -F'|' '{print $2}'
   else
@@ -2529,13 +2563,7 @@ backend_meta_set_client() {
     payload_tpl="$(echo "$line" | awk -F'|' '{print $7}')"
     payload_ts="$(echo "$line" | awk -F'|' '{print $8}')"
   else
-    # compat viejo o inexistente
-    ip=""
-    port=""
-    created="0"
-    expires="0"
-    payload_tpl="-"
-    payload_ts="0"
+    ip=""; port=""; created="0"; expires="0"; payload_tpl="-"; payload_ts="0"
   fi
 
   if [[ -z "$ip" || -z "$port" ]]; then
@@ -2575,30 +2603,6 @@ backend_meta_set_payload() {
 
   backend_meta_upsert "$key" "$client" "$ip" "$port" "$created" "${expires:-0}" "$payload_tpl" "$payload_ts"
 }
-d_ts="$(echo "$line" | awk -F'|' '{print $8}')"
-      fi
-    fi
-  else
-    client="${2:-"-"}"; ip="${3:-}"; port="${4:-}"; created="${5:-0}"; expires="${6:-0}"
-    payload_tpl="${7:-"-"}"; payload_ts="${8:-0}"
-  fi
-
-  mkdir -p "$STATE_DIR" 2>/dev/null || true
-  [[ -f "$BACKEND_META_FILE" ]] || : > "$BACKEND_META_FILE"
-
-  # sanitizar
-  client="${client//|/-}"
-  client="$(echo "$client" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
-  [[ -z "${client}" ]] && client="-"
-  [[ -z "${payload_tpl}" ]] && payload_tpl="-"
-  [[ -z "${payload_ts}" ]] && payload_ts="0"
-
-  # remover vieja
-  grep -v -E "^${k}\|" "$BACKEND_META_FILE" > "${BACKEND_META_FILE}.tmp" 2>/dev/null || true
-  printf "%s|%s|%s|%s|%s|%s|%s|%s\n" "$k" "$client" "$ip" "$port" "$created" "$expires" "$payload_tpl" "$payload_ts" >> "${BACKEND_META_FILE}.tmp"
-  mv -f "${BACKEND_META_FILE}.tmp" "$BACKEND_META_FILE" 2>/dev/null || true
-  backend_meta_normalize
-}
 
 backend_meta_remove() {
   local k="$1"
@@ -2611,6 +2615,149 @@ backend_fmt_date() {
   local epoch="$1"
   [[ -z "$epoch" || "$epoch" == "0" ]] && { echo "-"; return 0; }
   date -d "@$epoch" "+%Y-%m-%d" 2>/dev/null || echo "-"
+}
+
+client_price_default_get() {
+  [[ -f "$CLIENT_PRICE_DEFAULT_FILE" ]] || { echo ""; return 0; }
+  local v
+  v="$(tr -dc '0-9' < "$CLIENT_PRICE_DEFAULT_FILE" 2>/dev/null || true)"
+  echo "$v"
+}
+
+client_price_default_set() {
+  local v="${1:-}"
+  v="$(printf "%s" "$v" | tr -dc '0-9')"
+  printf "%s" "$v" > "$CLIENT_PRICE_DEFAULT_FILE"
+}
+
+client_price_get_override() {
+  local key="$1"
+  [[ -f "$CLIENT_PRICE_FILE" ]] || { echo ""; return 0; }
+  awk -F'|' -v k="$key" '$1==k{print $2; exit}' "$CLIENT_PRICE_FILE" 2>/dev/null || true
+}
+
+client_price_get_effective() {
+  local key="$1" v
+  v="$(client_price_get_override "$key")"
+  if [[ -n "$v" ]]; then
+    echo "$v"
+  else
+    client_price_default_get
+  fi
+}
+
+client_price_set_override() {
+  local key="$1" value="$2"
+  value="$(printf "%s" "$value" | tr -dc '0-9')"
+  [[ -f "$CLIENT_PRICE_FILE" ]] || : > "$CLIENT_PRICE_FILE"
+  awk -F'|' -v k="$key" 'BEGIN{OFS="|"} $1!=k{print}' "$CLIENT_PRICE_FILE" 2>/dev/null > "${CLIENT_PRICE_FILE}.tmp" || true
+  printf "%s|%s\n" "$key" "$value" >> "${CLIENT_PRICE_FILE}.tmp"
+  mv -f "${CLIENT_PRICE_FILE}.tmp" "$CLIENT_PRICE_FILE" 2>/dev/null || true
+}
+
+client_price_remove_override() {
+  local key="$1"
+  [[ -f "$CLIENT_PRICE_FILE" ]] || return 0
+  awk -F'|' -v k="$key" 'BEGIN{OFS="|"} $1!=k{print}' "$CLIENT_PRICE_FILE" 2>/dev/null > "${CLIENT_PRICE_FILE}.tmp" || true
+  mv -f "${CLIENT_PRICE_FILE}.tmp" "$CLIENT_PRICE_FILE" 2>/dev/null || true
+}
+
+client_price_fmt() {
+  local v="${1:-}"
+  [[ -n "$v" ]] || { echo "-"; return 0; }
+  v="$(printf "%s" "$v" | tr -dc '0-9')"
+  [[ -n "$v" && "$v" != "0" ]] || { echo "-"; return 0; }
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$v" <<'PY'
+import sys
+n=int(sys.argv[1]) if sys.argv[1].isdigit() else 0
+print("$" + f"{n:,}".replace(",", ".") if n>0 else "-")
+PY
+  else
+    echo "\$$v"
+  fi
+}
+
+client_payment_get_line() {
+  local key="$1"
+  [[ -f "$CLIENT_PAYMENT_FILE" ]] || { echo ""; return 0; }
+  awk -F'|' -v k="$key" '$1==k{print; exit}' "$CLIENT_PAYMENT_FILE" 2>/dev/null || true
+}
+
+client_payment_get_status() {
+  local key="$1" line
+  line="$(client_payment_get_line "$key")"
+  [[ -n "$line" ]] || { echo "0"; return 0; }
+  echo "$line" | awk -F'|' '{print ($2=="1"?"1":"0")}'
+}
+
+client_payment_get_last() {
+  local key="$1" line
+  line="$(client_payment_get_line "$key")"
+  [[ -n "$line" ]] || { echo "0"; return 0; }
+  echo "$line" | awk -F'|' '{print ($3~/^[0-9]+$/?$3:0)}'
+}
+
+client_payment_set() {
+  local key="$1" status="$2" lastpay="${3:-0}"
+  [[ -f "$CLIENT_PAYMENT_FILE" ]] || : > "$CLIENT_PAYMENT_FILE"
+  status="$([[ "$status" == "1" ]] && echo 1 || echo 0)"
+  [[ "$lastpay" =~ ^[0-9]+$ ]] || lastpay=0
+  awk -F'|' -v k="$key" 'BEGIN{OFS="|"} $1!=k{print}' "$CLIENT_PAYMENT_FILE" 2>/dev/null > "${CLIENT_PAYMENT_FILE}.tmp" || true
+  printf "%s|%s|%s\n" "$key" "$status" "$lastpay" >> "${CLIENT_PAYMENT_FILE}.tmp"
+  mv -f "${CLIENT_PAYMENT_FILE}.tmp" "$CLIENT_PAYMENT_FILE" 2>/dev/null || true
+}
+
+client_payment_remove() {
+  local key="$1"
+  [[ -f "$CLIENT_PAYMENT_FILE" ]] || return 0
+  awk -F'|' -v k="$key" 'BEGIN{OFS="|"} $1!=k{print}' "$CLIENT_PAYMENT_FILE" 2>/dev/null > "${CLIENT_PAYMENT_FILE}.tmp" || true
+  mv -f "${CLIENT_PAYMENT_FILE}.tmp" "$CLIENT_PAYMENT_FILE" 2>/dev/null || true
+}
+
+client_payment_mark_paid_now() {
+  local key="$1"
+  client_payment_set "$key" 1 "$(date +%s)"
+}
+
+client_payment_mark_unpaid() {
+  local key="$1" last
+  last="$(client_payment_get_last "$key")"
+  client_payment_set "$key" 0 "$last"
+}
+
+client_lastpay_fmt() {
+  local epoch="${1:-0}"
+  [[ "$epoch" =~ ^[0-9]+$ ]] || epoch=0
+  [[ "$epoch" -gt 0 ]] || { echo "-"; return 0; }
+  date -d "@$epoch" "+%Y-%m-%d" 2>/dev/null || echo "-"
+}
+
+client_pay_status_text() {
+  local key="$1" s
+  s="$(client_payment_get_status "$key")"
+  [[ "$s" == "1" ]] && echo "PAGÓ" || echo "PEND"
+}
+
+client_due_color() {
+  local exp="${1:-0}" now diff days
+  now="$(date +%s)"
+  [[ "$exp" =~ ^[0-9]+$ ]] || exp=0
+  if [[ "$exp" -le 0 ]]; then
+    echo "$GRN"
+    return 0
+  fi
+  diff=$(( exp - now ))
+  if (( diff <= 0 )); then
+    echo "$RED"
+  else
+    days=$(( (diff + 86399) / 86400 ))
+    if (( days <= 3 )); then
+      echo "$YLW"
+    else
+      echo "$GRN"
+    fi
+  fi
 }
 
 backend_delete_by_key() {
@@ -2866,6 +3013,392 @@ backend_delete_expired() {
 }
 
 
+
+# ------------------ CLIENTES (sincronizado con backends) ------------------
+client_days_enabled() {
+  local created="${1:-0}" exp="${2:-0}"
+  [[ "$created" =~ ^[0-9]+$ && "$exp" =~ ^[0-9]+$ ]] || { echo "-"; return 0; }
+  [[ "$created" -gt 0 && "$exp" -gt 0 && "$exp" -ge "$created" ]] || { echo "-"; return 0; }
+  echo $(( (exp - created + 86399) / 86400 ))
+}
+
+client_days_remaining() {
+  local exp="${1:-0}" now
+  now="$(date +%s)"
+  [[ "$exp" =~ ^[0-9]+$ ]] || { echo "-"; return 0; }
+  [[ "$exp" -gt 0 ]] || { echo "-"; return 0; }
+  if (( exp <= now )); then echo "0"; else echo $(( (exp - now + 86399) / 86400 )); fi
+}
+
+client_payload_tpl_get() {
+  local key="$1" line nf pay idx="${PAYLOAD_GEN_INDEX:-${STATE_DIR}/payloads/generated.index}"
+  line="$(backend_meta_get "$key" 2>/dev/null || true)"
+  nf="$(echo "$line" | awk -F'|' '{print NF}' 2>/dev/null || echo 0)"
+  pay="-"
+  if [[ -n "$line" && "${nf:-0}" -ge 7 ]]; then
+    pay="$(echo "$line" | awk -F'|' '{print $7}')"
+  fi
+  if [[ -z "$pay" || "$pay" == "-" ]]; then
+    pay="$(awk -F'|' -v b="$key" '$1==b{print $2; exit}' "$idx" 2>/dev/null || true)"
+    [[ -z "$pay" ]] && pay="-"
+  fi
+  echo "$pay"
+}
+
+client_print_block() {
+  local txt="$1"
+  local O
+  if [[ -w /dev/tty ]]; then O="/dev/tty"; else O="/dev/stdout"; fi
+  echo >"$O"
+  echo ">>> COPY BELOW (seleccioná de [START_CLIENT_DATA] a [END_CLIENT_DATA]) <<<" >"$O"
+  echo "[START_CLIENT_DATA]" >"$O"
+  printf "%s\n" "$txt" >"$O"
+  echo "[END_CLIENT_DATA]" >"$O"
+  echo >"$O"
+}
+
+client_list_table() {
+  echo -e "${CYA}Clientes sincronizados con backends${NC}\n"
+  printf "%-4s %-16s %-16s %-16s %-6s %-10s %-10s %-6s %-6s %-10s %-7s %-10s %-4s\n" "#" "CLIENTE" "BACKEND" "IP" "PORT" "CREADO" "VENCE" "HAB." "REST" "PRECIO" "PAGO" "ÚLT.PAGO" "PAY"
+  echo "------------------------------------------------------------------------------------------------------------------------------------------------"
+  local i=0 line_map key url ipport ip port line nf client created exp pay price habil rest pay_status lastpay duec exp_s rest_s
+  while IFS= read -r line_map; do
+    [[ -z "$line_map" ]] && continue
+    i=$((i+1))
+    key="$(echo "$line_map" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
+    url="$(echo "$line_map" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
+    ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
+
+    line="$(backend_meta_get "$key" 2>/dev/null || true)"
+    nf="$(echo "$line" | awk -F'|' '{print NF}' 2>/dev/null || echo 0)"
+    client="-"; created="0"; exp="0"
+    if [[ -n "$line" && "${nf:-0}" -ge 6 ]]; then
+      client="$(echo "$line" | awk -F'|' '{print $2}')"
+      created="$(echo "$line" | awk -F'|' '{print $5}')"
+      exp="$(echo "$line" | awk -F'|' '{print $6}')"
+    elif [[ -n "$line" ]]; then
+      created="$(echo "$line" | awk -F'|' '{print $4}')"
+      exp="$(echo "$line" | awk -F'|' '{print $5}')"
+    fi
+
+    pay="$(client_payload_tpl_get "$key")"
+    price="$(client_price_fmt "$(client_price_get_effective "$key")")"
+    habil="$(client_days_enabled "$created" "$exp")"
+    rest="$(client_days_remaining "$exp")"
+    pay_status="$(client_pay_status_text "$key")"
+    lastpay="$(client_lastpay_fmt "$(client_payment_get_last "$key")")"
+    duec="$(client_due_color "$exp")"
+    exp_s="${duec}$(backend_fmt_date "$exp")${NC}"
+    rest_s="${duec}${rest}${NC}"
+
+    printf "%-4s %-16s %-16s %-16s %-6s %-10s %-19s %-6s %-15s %-10s %-7s %-10s %-4s\n" \
+      "$i" "${client:0:16}" "${key:0:16}" "$ip" "$port" "$(backend_fmt_date "$created")" "$exp_s" "$habil" "$rest_s" "$price" "$pay_status" "$lastpay" "$pay"
+  done < <(backend_lines)
+  [[ "$i" -gt 0 ]]
+}
+
+client_pick_key() {
+  local __var="${1:-}" n key
+  client_list_table || { echo -e "${YLW}No hay backends cargados.${NC}"; return 1; }
+  echo
+  read -r -p "Número: " n
+  [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${YLW}Inválido.${NC}"; return 1; }
+  mapfile -t __lines < <(backend_lines)
+  (( n>=1 && n<=${#__lines[@]} )) || { echo -e "${YLW}Fuera de rango.${NC}"; return 1; }
+  key="$(echo "${__lines[$((n-1))]}" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
+  if [[ -n "$__var" ]]; then printf -v "$__var" "%s" "$key"; else echo "$key"; fi
+  return 0
+}
+
+client_copy_data_menu() {
+  local key line nf client created exp ip port pay price habil rest ipport pay_status lastpay
+  client_pick_key key || return 0
+  line="$(backend_meta_get "$key" 2>/dev/null || true)"
+  nf="$(echo "$line" | awk -F'|' '{print NF}' 2>/dev/null || echo 0)"
+  client="-"; created="0"; exp="0"; ip=""; port=""
+  if [[ -n "$line" && "${nf:-0}" -ge 6 ]]; then
+    client="$(echo "$line" | awk -F'|' '{print $2}')"
+    ip="$(echo "$line" | awk -F'|' '{print $3}')"
+    port="$(echo "$line" | awk -F'|' '{print $4}')"
+    created="$(echo "$line" | awk -F'|' '{print $5}')"
+    exp="$(echo "$line" | awk -F'|' '{print $6}')"
+  else
+    ipport="$(backend_lookup_ipport "$key")"
+    ip="${ipport%%|*}"; port="${ipport##*|}"
+  fi
+  pay="$(client_payload_tpl_get "$key")"
+  price="$(client_price_fmt "$(client_price_get_effective "$key")")"
+  habil="$(client_days_enabled "$created" "$exp")"
+  rest="$(client_days_remaining "$exp")"
+  pay_status="$(client_pay_status_text "$key")"
+  lastpay="$(client_lastpay_fmt "$(client_payment_get_last "$key")")"
+  client_print_block "Cliente: ${client}; Backend: ${key}; IP: ${ip}; Puerto: ${port}; Fecha de creación: $(backend_fmt_date "$created"); Fecha de expiración: $(backend_fmt_date "$exp"); Días habilitados: ${habil}; Días restantes: ${rest}; Estado de pago: ${pay_status}; Último pago: ${lastpay}; Monto a pagar: ${price}; Payload: ${pay}."
+}
+
+client_price_default_menu() {
+  local cur new
+  cur="$(client_price_fmt "$(client_price_default_get)")"
+  echo -e "${CYA}Precio general por defecto${NC}"
+  echo "Actual: ${cur}"
+  echo
+  read -r -p "Nuevo precio general (solo número; vacío o 0 = sin precio): " new
+  new="$(printf "%s" "$new" | tr -dc '0-9')"
+  client_price_default_set "$new"
+  if [[ -n "$new" && "$new" != "0" ]]; then
+    echo -e "${GRN}✅ Precio general actualizado:${NC} $(client_price_fmt "$new")"
+  else
+    echo -e "${GRN}✅ Precio general quitado.${NC}"
+  fi
+}
+
+client_price_manual_menu() {
+  local key current new
+  client_pick_key key || return 0
+  current="$(client_price_fmt "$(client_price_get_effective "$key")")"
+  echo "Precio actual para ${key}: ${current}"
+  echo
+  read -r -p "Nuevo precio manual (solo número) o '-' para volver al general: " new
+  if [[ "$new" == "-" ]]; then
+    client_price_remove_override "$key"
+    echo -e "${GRN}✅ Precio manual quitado.${NC}"
+    return 0
+  fi
+  new="$(printf "%s" "$new" | tr -dc '0-9')"
+  [[ -n "$new" ]] || { echo -e "${YLW}Sin cambios.${NC}"; return 0; }
+  client_price_set_override "$key" "$new"
+  echo -e "${GRN}✅ Precio manual actualizado:${NC} $(client_price_fmt "$new")"
+}
+
+
+client_payment_status_menu() {
+  local key cur
+  client_pick_key key || return 0
+  cur="$(client_pay_status_text "$key")"
+  echo "Estado actual de ${key}: ${cur}"
+  echo
+  echo "1) Marcar PAGADO (último pago = hoy)"
+  echo "2) Marcar PENDIENTE / no pagado"
+  read -r -p "Opción: " op
+  case "$op" in
+    1) client_payment_mark_paid_now "$key"; echo -e "${GRN}✅ Marcado como PAGADO.${NC}" ;;
+    2) client_payment_mark_unpaid "$key"; echo -e "${GRN}✅ Marcado como PENDIENTE.${NC}" ;;
+    *) echo -e "${YLW}Sin cambios.${NC}" ;;
+  esac
+}
+
+client_last_payment_menu() {
+  local key cur in epoch
+  client_pick_key key || return 0
+  cur="$(client_lastpay_fmt "$(client_payment_get_last "$key")")"
+  echo "Último pago actual de ${key}: ${cur}"
+  echo
+  read -r -p "Nueva fecha de último pago (YYYY-MM-DD) o vacío=hoy, 0=quitar: " in
+  if [[ -z "$in" ]]; then
+    epoch="$(date +%s)"
+  elif [[ "$in" == "0" ]]; then
+    epoch=0
+  else
+    epoch="$(date -d "$in" +%s 2>/dev/null || echo '')"
+    [[ -n "$epoch" ]] || { echo -e "${RED}Fecha inválida.${NC}"; return 0; }
+  fi
+  client_payment_set "$key" "$(client_payment_get_status "$key")" "$epoch"
+  echo -e "${GRN}✅ Último pago actualizado:${NC} $(client_lastpay_fmt "$epoch")"
+}
+
+client_update_backend_refs() {
+  local old="$1" new="$2"
+  [[ "$old" == "$new" ]] && return 0
+
+  local idx="${PAYLOAD_GEN_INDEX:-${STATE_DIR}/payloads/generated.index}"
+  local pfile="${PAYLOAD_GEN_DIR:-${STATE_DIR}/payloads/generated}"
+
+  if [[ -f "$idx" ]]; then
+    awk -F'|' -v o="$old" -v n="$new" 'BEGIN{OFS="|"} {$1=($1==o?n:$1); print}' "$idx" > "${idx}.tmp" 2>/dev/null || true
+    mv -f "${idx}.tmp" "$idx" 2>/dev/null || true
+  fi
+
+  if [[ -d "$pfile" && -f "${pfile}/${old}.txt" ]]; then
+    mv -f "${pfile}/${old}.txt" "${pfile}/${new}.txt" 2>/dev/null || true
+  fi
+
+  if [[ -f "$CLIENT_PRICE_FILE" ]]; then
+    awk -F'|' -v o="$old" -v n="$new" 'BEGIN{OFS="|"} {$1=($1==o?n:$1); print}' "$CLIENT_PRICE_FILE" > "${CLIENT_PRICE_FILE}.tmp" 2>/dev/null || true
+    mv -f "${CLIENT_PRICE_FILE}.tmp" "$CLIENT_PRICE_FILE" 2>/dev/null || true
+  fi
+
+  if [[ -f "$NGX_LIMITS_BACKEND" ]]; then
+    awk -v o="$old" -v n="$new" '
+      {
+        if(match($0,/^[ \t]*"([^"]+)"/,m) && m[1]==o){
+          sub(/"[^"]+"/,"\"" n "\"")
+        }
+        print
+      }' "$NGX_LIMITS_BACKEND" > "${NGX_LIMITS_BACKEND}.tmp" 2>/dev/null || true
+    mv -f "${NGX_LIMITS_BACKEND}.tmp" "$NGX_LIMITS_BACKEND" 2>/dev/null || true
+  fi
+}
+
+client_edit_menu() {
+  local key old_key line nf client ip port created exp pay payts new_client new_key new_ip new_port price_in manual_price ipport
+  client_pick_key key || return 0
+  old_key="$key"
+  line="$(backend_meta_get "$key" 2>/dev/null || true)"
+  nf="$(echo "$line" | awk -F'|' '{print NF}' 2>/dev/null || echo 0)"
+
+  client="-"; ip=""; port="80"; created="$(date +%s)"; exp="0"; pay="-"; payts="0"
+  if [[ -n "$line" && "${nf:-0}" -ge 6 ]]; then
+    client="$(echo "$line" | awk -F'|' '{print $2}')"
+    ip="$(echo "$line" | awk -F'|' '{print $3}')"
+    port="$(echo "$line" | awk -F'|' '{print $4}')"
+    created="$(echo "$line" | awk -F'|' '{print $5}')"
+    exp="$(echo "$line" | awk -F'|' '{print $6}')"
+    pay="$(echo "$line" | awk -F'|' '{print $7}')"
+    payts="$(echo "$line" | awk -F'|' '{print $8}')"
+  else
+    ipport="$(backend_lookup_ipport "$key")"
+    ip="${ipport%%|*}"; port="${ipport##*|}"
+  fi
+  manual_price="$(client_price_get_override "$key")"
+
+  echo -e "${CYA}Editar cliente / backend${NC}"
+  read -r -p "Cliente [${client}]: " new_client
+  read -r -p "Backend [${key}]: " new_key
+  read -r -p "IP [${ip}]: " new_ip
+  read -r -p "Puerto [${port}]: " new_port
+  read -r -p "Precio manual actual $(client_price_fmt "$manual_price") (Enter=mantener, '-'=usar general, número=nuevo): " price_in
+
+  [[ -z "$new_client" ]] && new_client="$client"
+  [[ -z "$new_key" ]] && new_key="$key"
+  [[ -z "$new_ip" ]] && new_ip="$ip"
+  [[ -z "$new_port" ]] && new_port="$port"
+
+  validate_key "$new_key" || { echo -e "${RED}Backend inválido.${NC}"; return 0; }
+  validate_ip "$new_ip" || { echo -e "${RED}IP inválida.${NC}"; return 0; }
+  [[ "$new_port" =~ ^[0-9]{2,5}$ ]] || { echo -e "${RED}Puerto inválido.${NC}"; return 0; }
+
+  if [[ "$new_key" != "$old_key" ]] && grep -qE "^\s*\"${new_key}\"" "$NGX_BACKENDS_MAP" 2>/dev/null; then
+    echo -e "${RED}Ese nombre de backend ya existe.${NC}"
+    return 0
+  fi
+
+  local url="http://${new_ip}:${new_port}"
+  awk -v old="$old_key" -v new="$new_key" -v url="$url" '
+    BEGIN{done=0}
+    {
+      if(match($0,/^[ \t]*"([^"]+)"/,m) && m[1]==old){
+        printf "        \"%s\" \"%s\";\n", new, url
+        done=1
+        next
+      }
+      print
+    }
+    END{
+      if(!done) printf "        \"%s\" \"%s\";\n", new, url
+    }' "$NGX_BACKENDS_MAP" > "${NGX_BACKENDS_MAP}.tmp" && mv "${NGX_BACKENDS_MAP}.tmp" "$NGX_BACKENDS_MAP"
+
+  rebuild_balancer_files
+  ensure_http_conf_maps
+  ensure_mothers_include
+  write_apply_conf
+  nginx_test_reload
+
+  backend_meta_remove "$old_key"
+  backend_meta_upsert "$new_key" "$new_client" "$new_ip" "$new_port" "$created" "$exp" "$pay" "$payts"
+  client_update_backend_refs "$old_key" "$new_key"
+
+  if [[ "$price_in" == "-" ]]; then
+    client_price_remove_override "$new_key"
+  elif [[ -n "$price_in" ]]; then
+    price_in="$(printf "%s" "$price_in" | tr -dc '0-9')"
+    [[ -n "$price_in" ]] && client_price_set_override "$new_key" "$price_in"
+  elif [[ "$old_key" != "$new_key" && -n "$manual_price" ]]; then
+    client_price_set_override "$new_key" "$manual_price"
+  fi
+
+  echo -e "${GRN}✅ Cliente/backend actualizado.${NC}"
+}
+
+client_renew_menu() {
+  local key line nf client ip port created exp pay payts days now newexp ipport
+  client_pick_key key || return 0
+  line="$(backend_meta_get "$key" 2>/dev/null || true)"
+  nf="$(echo "$line" | awk -F'|' '{print NF}' 2>/dev/null || echo 0)"
+
+  client="-"; ip=""; port="80"; created="$(date +%s)"; exp="0"; pay="-"; payts="0"
+  if [[ -n "$line" && "${nf:-0}" -ge 6 ]]; then
+    client="$(echo "$line" | awk -F'|' '{print $2}')"
+    ip="$(echo "$line" | awk -F'|' '{print $3}')"
+    port="$(echo "$line" | awk -F'|' '{print $4}')"
+    created="$(echo "$line" | awk -F'|' '{print $5}')"
+    exp="$(echo "$line" | awk -F'|' '{print $6}')"
+    pay="$(echo "$line" | awk -F'|' '{print $7}')"
+    payts="$(echo "$line" | awk -F'|' '{print $8}')"
+  else
+    ipport="$(backend_lookup_ipport "$key")"
+    ip="${ipport%%|*}"; port="${ipport##*|}"
+  fi
+
+  read -r -p "Sumar días (ej: 30): " days
+  [[ "$days" =~ ^[0-9]+$ ]] || { echo -e "${RED}Días inválidos.${NC}"; return 0; }
+  (( days>=1 && days<=3650 )) || { echo -e "${RED}Días fuera de rango.${NC}"; return 0; }
+
+  now="$(date +%s)"
+  if [[ "$exp" =~ ^[0-9]+$ ]] && (( exp > now )); then
+    newexp="$(( exp + days*86400 ))"
+  else
+    newexp="$(( now + days*86400 ))"
+  fi
+
+  backend_meta_upsert "$key" "$client" "$ip" "$port" "$created" "$newexp" "$pay" "$payts"
+  echo -e "${GRN}✅ Renovado.${NC} Nueva expiración: $(backend_fmt_date "$newexp")"
+}
+
+client_delete_menu() {
+  local key
+  client_pick_key key || return 0
+  read -r -p "Confirmar eliminar ${key} (s/N): " yn
+  case "${yn,,}" in
+    s|si|sí|y|yes) ;;
+    *) echo -e "${YLW}Cancelado.${NC}"; return 0 ;;
+  esac
+  backend_delete_by_key "$key" >/dev/null 2>&1 || true
+  client_price_remove_override "$key"
+  client_payment_remove "$key"
+  echo -e "${GRN}✅ Eliminado:${NC} $key"
+}
+
+clients_menu() {
+  while true; do
+    echo -e "${WHT}👥 Clientes / precios / renovación${NC}"
+    echo -e "${DIM}Lista sincronizada con backends y vencimientos.${NC}\n"
+    echo "1) 📋 Listar clientes"
+    echo "2) 📌 Copiar datos de un cliente"
+    echo "3) 💲 Precio general por defecto"
+    echo "4) 💲 Precio manual por cliente"
+    echo "5) 💳 Estado de pago (pagó / pendiente)"
+    echo "6) 🗓️  Último pago"
+    echo "7) ✏️  Editar cliente / backend / IP / puerto"
+    echo "8) 🔄 Renovar cliente (sumar días)"
+    echo "9) 🗑️  Eliminar cliente / backend"
+    echo "0) Volver"
+    echo
+    read -r -p "Opción: " c
+    echo
+    case "$c" in
+      1) client_list_table; pause ;;
+      2) client_copy_data_menu; pause ;;
+      3) client_price_default_menu; pause ;;
+      4) client_price_manual_menu; pause ;;
+      5) client_payment_status_menu; pause ;;
+      6) client_last_payment_menu; pause ;;
+      7) client_edit_menu; pause ;;
+      8) client_renew_menu; pause ;;
+      9) client_delete_menu; pause ;;
+      0) return 0 ;;
+      *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
+    esac
+  done
+}
 
 # ------------------ PAYLOADS (plantillas + generar con backend) ------------------
 PAYLOAD_DIR="${STATE_DIR}/payloads"
@@ -3613,6 +4146,7 @@ add_backend_menu() {
     echo "5) 🗑️  Eliminar backend (manual)"
     echo "6) 🧹 Eliminar expirados"
     echo "7) 🧾 Payloads (generar / administrar)"
+    echo "8) 👥 Clientes (lista / precios / renovar)"
     echo "0) Volver"
     echo
     read -r -p "Opción: " o
@@ -3625,6 +4159,7 @@ add_backend_menu() {
       5) delete_backend_pick; pause ;;
       6) backend_delete_expired; pause ;;
       7) payload_menu; pause ;;
+      8) clients_menu; pause ;;
       0) return 0 ;;
       *) echo -e "${YLW}Opción inválida.${NC}"; pause ;;
     esac
