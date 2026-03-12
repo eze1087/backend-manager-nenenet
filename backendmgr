@@ -2101,7 +2101,7 @@ speed_limit_apply_all_backends() {
   sanitize_speed_limit_files
   for line in "${lines[@]}"; do
     [[ -z "$line" ]] && continue
-    key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$//')"
+    key="$(echo "$line" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
     [[ -z "$key" ]] && continue
     map_set_line "$NGX_LIMITS_BACKEND" "$key" "$rate" "quote"
     count=$((count+1))
@@ -3106,7 +3106,7 @@ client_pick_key() {
   [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${YLW}Inválido.${NC}"; return 1; }
   mapfile -t __lines < <(backend_lines)
   (( n>=1 && n<=${#__lines[@]} )) || { echo -e "${YLW}Fuera de rango.${NC}"; return 1; }
-  picked_key="$(echo "${__lines[$((n-1))]}" | sed -E 's/^\s*"([^"]+)".*$//')"
+  picked_key="$(echo "${__lines[$((n-1))]}" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
   [[ -n "$picked_key" ]] || { echo -e "${YLW}Backend inválido.${NC}"; return 1; }
   if [[ -n "$__var" ]]; then
     printf -v "$__var" "%s" "$picked_key"
