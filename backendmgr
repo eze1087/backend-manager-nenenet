@@ -57,6 +57,7 @@ BACKEND_META_FILE="${STATE_DIR}/backends.meta"
 CLIENT_PRICE_FILE="${STATE_DIR}/client_prices.db"
 CLIENT_PRICE_DEFAULT_FILE="${STATE_DIR}/client_price_default"
 CLIENT_PAYMENT_FILE="${STATE_DIR}/client_payments.db"
+CLIENT_PICK_INDEX_FILE="${STATE_DIR}/client_pick.index"
 
 
 # ------------------ COLORES ------------------
@@ -3058,29 +3059,34 @@ client_print_block() {
 }
 
 client_list_table() {
+  local idxf="${CLIENT_PICK_INDEX_FILE:-${STATE_DIR}/client_pick.index}"
+  : > "$idxf"
   echo -e "${CYA}Clientes sincronizados con backends${NC}\n"
   printf "%-4s %-16s %-16s %-16s %-6s %-10s %-10s %-6s %-6s %-10s %-7s %-10s %-4s\n" "#" "CLIENTE" "BACKEND" "IP" "PORT" "CREADO" "VENCE" "HAB." "REST" "PRECIO" "PAGO" "ÚLT.PAGO" "PAY"
   echo "------------------------------------------------------------------------------------------------------------------------------------------------"
-  local i=0 line_map key url ipport ip port line nf client created exp pay price habil rest pay_status lastpay duec exp_s rest_s
-  while IFS= read -r line_map; do
-    [[ -z "$line_map" ]] && continue
-    i=$((i+1))
-    key="$(echo "$line_map" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
-    url="$(echo "$line_map" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
-    ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
 
+  local i=0 key line nf client ip port created exp pay price habil rest duec pay_status lastpay
+  while IFS= read -r bline; do
+    [[ -z "$bline" ]] && continue
+    i=$((i+1))
+    key="$(echo "$bline" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
     line="$(backend_meta_get "$key" 2>/dev/null || true)"
     nf="$(echo "$line" | awk -F'|' '{print NF}' 2>/dev/null || echo 0)"
-    client="-"; created="0"; exp="0"
+
+    client="-"; ip=""; port=""; created="0"; exp="0"
     if [[ -n "$line" && "${nf:-0}" -ge 6 ]]; then
       client="$(echo "$line" | awk -F'|' '{print $2}')"
+      ip="$(echo "$line" | awk -F'|' '{print $3}')"
+      port="$(echo "$line" | awk -F'|' '{print $4}')"
       created="$(echo "$line" | awk -F'|' '{print $5}')"
       exp="$(echo "$line" | awk -F'|' '{print $6}')"
-    elif [[ -n "$line" ]]; then
-      created="$(echo "$line" | awk -F'|' '{print $4}')"
-      exp="$(echo "$line" | awk -F'|' '{print $5}')"
+    else
+      local url ipport
+      url="$(echo "$bline" | sed -E 's/^.*"\s+"([^"]+)";\s*$/\1/')"
+      ipport="${url#http://}"; ip="${ipport%%:*}"; port="${ipport##*:}"
     fi
 
+    [[ -n "$client" ]] || client="-"
     pay="$(client_payload_tpl_get "$key")"
     price="$(client_price_fmt "$(client_price_get_effective "$key")")"
     habil="$(client_days_enabled "$created" "$exp")"
@@ -3088,26 +3094,26 @@ client_list_table() {
     pay_status="$(client_pay_status_text "$key")"
     lastpay="$(client_lastpay_fmt "$(client_payment_get_last "$key")")"
     duec="$(client_due_color "$exp")"
-    exp_s="${duec}$(backend_fmt_date "$exp")${NC}"
-    rest_s="${duec}${rest}${NC}"
 
-    printf "%-4s %-16s %-16s %-16s %-6s %-10s %-19s %-6s %-15s %-10s %-7s %-10s %-4s\n" \
-      "$i" "${client:0:16}" "${key:0:16}" "$ip" "$port" "$(backend_fmt_date "$created")" "$exp_s" "$habil" "$rest_s" "$price" "$pay_status" "$lastpay" "$pay"
+    printf "%s|%s\n" "$i" "$key" >> "$idxf"
+    printf "%-4s %-16s %-16s %-16s %-6s %-10s %b%-10s%b %-6s %-6s %-10s %-7s %-10s %-4s\n" \
+      "$i" "${client:--}" "$key" "$ip" "$port" "$(backend_fmt_date "$created")" \
+      "$duec" "$(backend_fmt_date "$exp")" "$NC" \
+      "$habil" "$rest" "$price" "$pay_status" "$lastpay" "$pay"
   done < <(backend_lines)
+
   [[ "$i" -gt 0 ]]
 }
 
 client_pick_key() {
-  local __var="${1:-}" n picked_key
-  local -a __lines=()
+  local __var="${1:-}" n picked_key idxf="${CLIENT_PICK_INDEX_FILE:-${STATE_DIR}/client_pick.index}"
   client_list_table || { echo -e "${YLW}No hay backends cargados.${NC}"; return 1; }
   echo
   read -r -p "Número: " n
   [[ "$n" =~ ^[0-9]+$ ]] || { echo -e "${YLW}Inválido.${NC}"; return 1; }
-  mapfile -t __lines < <(backend_lines)
-  (( n>=1 && n<=${#__lines[@]} )) || { echo -e "${YLW}Fuera de rango.${NC}"; return 1; }
-  picked_key="$(echo "${__lines[$((n-1))]}" | sed -E 's/^\s*"([^"]+)".*$/\1/')"
-  [[ -n "$picked_key" ]] || { echo -e "${YLW}Backend inválido.${NC}"; return 1; }
+  [[ -f "$idxf" ]] || { echo -e "${YLW}Lista no disponible.${NC}"; return 1; }
+  picked_key="$(awk -F'|' -v n="$n" '$1==n{print $2; exit}' "$idxf" 2>/dev/null || true)"
+  [[ -n "$picked_key" ]] || { echo -e "${YLW}Fuera de rango.${NC}"; return 1; }
   if [[ -n "$__var" ]]; then
     printf -v "$__var" "%s" "$picked_key"
   else
