@@ -5007,44 +5007,59 @@ maintenance_menu() {
 }
 
 # ------------------ SPEEDTEST ------------------
+speedtest_is_official() {
+  dpkg-query -W -f='${Status}' speedtest 2>/dev/null | grep -q "install ok installed"
+}
+
 speedtest_install_if_needed() {
-  if command -v speedtest >/dev/null 2>&1; then
+  if speedtest_is_official && command -v speedtest >/dev/null 2>&1; then
     return 0
   fi
 
-  echo -e "${YLW}⚠️ Speedtest no está instalado.${NC}"
-  echo -e "${DIM}Intento instalar speedtest-cli (apt).${NC}"
+  echo -e "${YLW}⚠️ Speedtest oficial de Ookla no está instalado.${NC}"
+  echo -e "${DIM}Voy a instalar la versión oficial de Ookla.${NC}"
 
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y >/dev/null 2>&1 || true
-  apt-get install -y speedtest-cli >/dev/null 2>&1 || true
 
-  if command -v speedtest >/dev/null 2>&1; then
-    echo -e "${GRN}✅ Speedtest instalado (speedtest-cli).${NC}"
+  # Evitar conflictos con la versión no oficial de Python
+  if dpkg-query -W -f='${Status}' speedtest-cli 2>/dev/null | grep -q "install ok installed"; then
+    apt-get remove -y speedtest-cli >/dev/null 2>&1 || true
+  fi
+
+  apt-get update -y >/dev/null 2>&1 || true
+  apt-get install -y curl ca-certificates gnupg >/dev/null 2>&1 || true
+
+  curl -fsSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | bash >/dev/null 2>&1 || true
+  apt-get update -y >/dev/null 2>&1 || true
+  apt-get install -y speedtest >/dev/null 2>&1 || true
+
+  if speedtest_is_official && command -v speedtest >/dev/null 2>&1; then
+    echo -e "${GRN}✅ Speedtest oficial de Ookla instalado.${NC}"
     return 0
   fi
 
-  echo -e "${RED}ERROR:${NC} No pude instalar speedtest-cli."
-  echo -e "${DIM}Probá manualmente:${NC} apt-get update && apt-get install -y speedtest-cli"
+  echo -e "${RED}ERROR:${NC} No pude instalar el Speedtest oficial de Ookla."
+  echo -e "${DIM}Probá manualmente:${NC} curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | bash && apt-get install -y speedtest"
   return 0
 }
 
 speedtest_menu() {
   echo -e "${CYA}Speedtest del servidor (Ping / Bajada / Subida)${NC}"
-  echo -e "${DIM}Usa speedtest-cli. Puede tardar 20–60s según red.${NC}\n"
+  echo -e "${DIM}Usa la CLI oficial de Ookla. Puede tardar 20–60s según red.${NC}
+"
 
   speedtest_install_if_needed
 
-  if ! command -v speedtest >/dev/null 2>&1; then
-    echo -e "${YLW}No se pudo ejecutar speedtest porque no está instalado.${NC}"
+  if ! speedtest_is_official || ! command -v speedtest >/dev/null 2>&1; then
+    echo -e "${YLW}No se pudo ejecutar Speedtest porque la CLI oficial no está instalada.${NC}"
     return 0
   fi
 
-  echo -e "${DIM}Ejecutando...${NC}\n"
-  speedtest --simple || true
+  echo -e "${DIM}Ejecutando...${NC}
+"
+  speedtest --accept-license --accept-gdpr || true
   return 0
 }
-
 
 # ------------------ UNINSTALL (integrado al panel) ------------------
 stop_disable_unit(){
