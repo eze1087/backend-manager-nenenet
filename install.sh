@@ -277,9 +277,16 @@ install_wrapper_nginx(){
   local SBIN="/usr/sbin/nginx"
   local REAL="/usr/sbin/nginx.real"
 
+  # Detener nginx para liberar el binario (evita "Text file busy")
+  systemctl stop nginx 2>/dev/null || true
+
   if [[ -x "$SBIN" && ! -x "$REAL" ]]; then
     cp -a "$SBIN" "${BACKUP_DIR}/nginx.sbin.bak-$(date +%Y%m%d-%H%M%S)" || true
     mv "$SBIN" "$REAL"
+  elif [[ -x "$SBIN" && -x "$REAL" ]]; then
+    # Wrapper ya instalado previamente pero fue sobreescrito: respaldarlo y reemplazar
+    cp -a "$SBIN" "${BACKUP_DIR}/nginx.sbin.bak-$(date +%Y%m%d-%H%M%S)" || true
+    rm -f "$SBIN"
   fi
 
   cat > "$SBIN" <<'WRAP'
@@ -366,6 +373,13 @@ WRAP
   ln -sf /usr/sbin/nginx /usr/local/bin/nginx 2>/dev/null || true
   ln -sf /usr/sbin/nginx /usr/bin/nginx 2>/dev/null || true
   bash -n /usr/sbin/nginx
+
+  # Reiniciar nginx despues de instalar el wrapper
+  systemctl start nginx 2>/dev/null || true
+
+  # Proteger nginx de actualizaciones automaticas que sobreescriben el wrapper
+  apt-mark hold nginx 2>/dev/null || true
+  echo "  -> nginx fijado (apt-mark hold) para proteger el wrapper."
 }
 
 main(){
